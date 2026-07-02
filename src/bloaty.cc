@@ -709,6 +709,12 @@ std::string PercentString(double percent, bool diff_mode) {
       return LeftPad(str, 6);
     }
   } else {
+    if (std::isnan(percent)) {
+      // Percent() returns NaN when both part and whole are zero, e.g. the VM
+      // percent of an input with no VM data at all (a WASM module, an object
+      // file).  Print a sane fixed-width value instead of "NAN%".
+      percent = 0;
+    }
     return DoubleStringPrintf("%5.1F%%", percent);
   }
 }

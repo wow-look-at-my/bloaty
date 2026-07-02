@@ -124,6 +124,16 @@ TEST_F(IngestionTest, WasmSections) {
   ExpectRowsNamed({"Code", "Data", "linking", "producers"});
 }
 
+// A WASM module has no VM data at all, so every VM percentage is 0/0; the
+// report must print a sane value (0.0%), not "NAN%".
+TEST_F(IngestionTest, WasmZeroVmPercentIsSane) {
+  RunBloaty({"bloaty", "-d", "sections", "-n", "0", "wasm-module.wasm"});
+  std::string pretty = PrettyOutput();
+  EXPECT_THAT(pretty, testing::Not(testing::HasSubstr("NAN")));
+  EXPECT_THAT(pretty, testing::Not(testing::HasSubstr("nan")));
+  EXPECT_THAT(pretty, testing::HasSubstr("0.0%"));
+}
+
 TEST_F(IngestionTest, WasmSymbols) {
   RunBloaty({"bloaty", "-d", "symbols", "--domain=file", "-n", "0",
              "wasm-module.wasm"});
