@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  push:
+
+# Every job builds bloaty and runs the full ctest suite, which includes
+# bloaty_ingestion_test: every OS parses fixtures of every supported format
+# (ELF, PE, Mach-O thin + universal, WASM, DWARF5) with no external tools.
+# The lit suite (deeper per-format coverage; needs FileCheck + yaml2obj at
+# test time) runs where those tools are cheap to install: apt on Linux, brew
+# on macOS. On Windows there is no cheap prebuilt FileCheck/yaml2obj (the
+# official LLVM release tarballs are not verified to ship them, and building
+# LLVM from source takes hours), so the Windows job is ctest-only; the
+# ingestion test still proves all-format parsing there.
+
+jobs:
+  linux-gcc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache llvm-18 llvm-18-tools
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-linux-gcc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-linux-gcc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-linux-gcc-
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFILECHECK_EXECUTABLE=/usr/lib/llvm-18/bin/FileCheck
+          -DYAML2OBJ_EXECUTABLE=/usr/lib/llvm-18/bin/yaml2obj
+          -DLIT_EXECUTABLE=/usr/lib/llvm-18/build/utils/lit/lit.py
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Test (lit)
+        run: cmake --build build --target check-bloaty
+      - name: ccache stats
+        run: ccache -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-linux-x64
+          path: build/bloaty
+
+  linux-clang:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache llvm-18 llvm-18-tools
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-linux-clang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-linux-clang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-linux-clang-
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFILECHECK_EXECUTABLE=/usr/lib/llvm-18/bin/FileCheck
+          -DYAML2OBJ_EXECUTABLE=/usr/lib/llvm-18/bin/yaml2obj
+          -DLIT_EXECUTABLE=/usr/lib/llvm-18/build/utils/lit/lit.py
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Test (lit)
+        run: cmake --build build --target check-bloaty
+      - name: ccache stats
+        run: ccache -s
+
+  macos:
+    runs-on: macos-latest  # arm64 (Apple Silicon), AppleClang
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          brew install ccache ninja llvm
+          python3 -m pip install lit
+      - name: Check test tools
+        # The lit suite needs FileCheck and yaml2obj; Homebrew's llvm formula
+        # builds with -DLLVM_INSTALL_UTILS=ON, which ships both. Fail loudly
+        # here (not deep in the test step) if that ever changes.
+        run: |
+          ls -l "$(brew --prefix llvm)/bin/FileCheck" "$(brew --prefix llvm)/bin/yaml2obj"
+          command -v lit
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-macos-appleclang-
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFILECHECK_EXECUTABLE="$(brew --prefix llvm)/bin/FileCheck"
+          -DYAML2OBJ_EXECUTABLE="$(brew --prefix llvm)/bin/yaml2obj"
+          -DLIT_EXECUTABLE="$(command -v lit)"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Test (lit)
+        run: cmake --build build --target check-bloaty
+      - name: ccache stats
+        run: ccache -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-macos-arm64
+          path: build/bloaty
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: choco install -y --no-progress ccache ninja
+      - name: Locate Visual Studio
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "No Visual Studio installation with C++ tools found" }
+          "BLOATY_VS_PATH=$vs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Import MSVC x64 environment
+        # Hand-rolled vcvars (third-party setup actions are not allowed):
+        # run vcvars64.bat, then export the resulting environment (PATH,
+        # INCLUDE, LIB, ...) to all following steps.
+        shell: cmd
+        run: call "%BLOATY_VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" && set >> "%GITHUB_ENV%"
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-windows-msvc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-windows-msvc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-windows-msvc-
+      - name: Configure
+        # Release (not Debug/RelWithDebInfo): ccache cannot cache /Zi debug
+        # info, and MSVC Debug is by far the slowest configuration.
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test (ctest)
+        # No lit here: FileCheck/yaml2obj have no cheap prebuilt source on
+        # Windows. ctest includes bloaty_ingestion_test, which still proves
+        # that Windows ingests every format (ELF, PE, Mach-O, WASM, DWARF5).
+        run: ctest --test-dir build --output-on-failure
+      - name: ccache stats
+        run: ccache -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-windows-x64
+          path: build/bloaty.exe
