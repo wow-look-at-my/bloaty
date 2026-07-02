@@ -63,6 +63,40 @@ inline std::string DebugString(const google::protobuf::Message& message) {
   return ret;
 }
 
+// Splits one CSV row into fields, understanding the RFC 4180-style quoting
+// produced by CSVEscape() in bloaty.cc: fields containing ',' or '"' are
+// wrapped in double quotes, with embedded quotes doubled.  A naive split on
+// ',' would break on labels like the Mach-O section name "__TEXT,__text".
+inline std::vector<std::string> SplitCSVRow(const std::string& row) {
+  std::vector<std::string> cols;
+  std::string field;
+  bool in_quotes = false;
+  for (size_t i = 0; i < row.size(); i++) {
+    char ch = row[i];
+    if (in_quotes) {
+      if (ch == '"') {
+        if (i + 1 < row.size() && row[i + 1] == '"') {
+          field += '"';
+          i++;
+        } else {
+          in_quotes = false;
+        }
+      } else {
+        field += ch;
+      }
+    } else if (ch == '"') {
+      in_quotes = true;
+    } else if (ch == ',') {
+      cols.push_back(field);
+      field.clear();
+    } else {
+      field += ch;
+    }
+  }
+  cols.push_back(field);
+  return cols;
+}
+
 #define NONE_STRING "[None]"
 
 // Testing Bloaty requires a delicate balance.  Bloaty's output is by its
@@ -119,7 +153,7 @@ class BloatyTest : public ::testing::Test {
     ASSERT_EQ(rows.size() - 1, row_count);
     bool first = true;
     for (const auto& row : rows) {
-      std::vector<std::string> cols = absl::StrSplit(row, ',');
+      std::vector<std::string> cols = SplitCSVRow(row);
       if (first) {
         // header row should be: header1,header2,...,vmsize,filesize
         std::vector<std::string> expected_headers(output_->source_names());
