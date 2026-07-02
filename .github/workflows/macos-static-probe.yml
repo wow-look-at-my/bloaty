@@ -10,6 +10,12 @@ name: macOS static probe
 
 on:
   workflow_dispatch:
+  push:
+    # Never runs on normal pushes: only when this probe file itself changes.
+    # (workflow_dispatch alone is not enough: a workflow that exists only on
+    # a non-default branch is not registered, so the dispatch API 404s.)
+    paths:
+      - '.github/workflows/macos-static-probe.yml'
 
 concurrency:
   group: probe-${{ github.ref }}
