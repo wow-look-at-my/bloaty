@@ -1,0 +1,158 @@
+# yaml2obj source for macho-universal.bin: a Mach-O universal (fat) binary
+# containing an x86_64 slice and an arm64 slice.  Derived from
+# tests/macho/archs.test (docnum=1).
+#
+# Regenerate with:
+#   yaml2obj macho-universal.yaml -o macho-universal.bin
+--- !fat-mach-o
+FatHeader:
+  magic:           0xCAFEBABE
+  nfat_arch:       2
+FatArchs:
+  - cputype:         0x1000007
+    cpusubtype:      0x3
+    offset:          0x1000
+    size:            4176
+    align:           12
+  - cputype:         0x100000C
+    cpusubtype:      0x0
+    offset:          0x2050
+    size:            8280
+    align:           12
+Slices:
+  - !mach-o
+    FileHeader:
+      magic:           0xFEEDFACF
+      cputype:         0x1000007
+      cpusubtype:      0x3
+      filetype:        0x2
+      ncmds:           3
+      sizeofcmds:      328
+      flags:           0x200085
+      reserved:        0x0
+    LoadCommands:
+      - cmd:             LC_SEGMENT_64
+        cmdsize:         72
+        segname:         __PAGEZERO
+        vmaddr:          0
+        vmsize:          4294967296
+        fileoff:         0
+        filesize:        0
+        maxprot:         0
+        initprot:        0
+        nsects:          0
+        flags:           0
+      - cmd:             LC_SEGMENT_64
+        cmdsize:         152
+        segname:         __TEXT
+        vmaddr:          4294967296
+        vmsize:          4096
+        fileoff:         0
+        filesize:        4096
+        maxprot:         5
+        initprot:        5
+        nsects:          1
+        flags:           0
+        Sections:
+          - sectname:        __text
+            segname:         __TEXT
+            addr:            0x100000F80
+            size:            8
+            offset:          0xF80
+            align:           4
+            reloff:          0x0
+            nreloc:          0
+            flags:           0x80000400
+            reserved1:       0x0
+            reserved2:       0x0
+            reserved3:       0x0
+            content:         554889E531C05DC3
+      - cmd:             LC_SEGMENT_64
+        cmdsize:         72
+        segname:         __LINKEDIT
+        vmaddr:          4294971392
+        vmsize:          4096
+        fileoff:         4096
+        filesize:        80
+        maxprot:         1
+        initprot:        1
+        nsects:          0
+        flags:           0
+    LinkEditData:
+      NameList:
+        - n_strx:          1
+          n_type:          0xF
+          n_sect:          1
+          n_desc:          0
+          n_value:         4294971264
+      StringTable:
+        - ' '
+        - _main
+  - !mach-o
+    FileHeader:
+      magic:           0xFEEDFACF
+      cputype:         0x100000C
+      cpusubtype:      0x0
+      filetype:        0x2
+      ncmds:           3
+      sizeofcmds:      328
+      flags:           0x200085
+      reserved:        0x0
+    LoadCommands:
+      - cmd:             LC_SEGMENT_64
+        cmdsize:         72
+        segname:         __PAGEZERO
+        vmaddr:          0
+        vmsize:          4294967296
+        fileoff:         0
+        filesize:        0
+        maxprot:         0
+        initprot:        0
+        nsects:          0
+        flags:           0
+      - cmd:             LC_SEGMENT_64
+        cmdsize:         152
+        segname:         __TEXT
+        vmaddr:          4294967296
+        vmsize:          8192
+        fileoff:         0
+        filesize:        8192
+        maxprot:         5
+        initprot:        5
+        nsects:          1
+        flags:           0
+        Sections:
+          - sectname:        __text
+            segname:         __TEXT
+            addr:            0x100001F80
+            size:            8
+            offset:          0x1F80
+            align:           2
+            reloff:          0x0
+            nreloc:          0
+            flags:           0x80000400
+            reserved1:       0x0
+            reserved2:       0x0
+            reserved3:       0x0
+            content:         00008052C0035FD6
+      - cmd:             LC_SEGMENT_64
+        cmdsize:         72
+        segname:         __LINKEDIT
+        vmaddr:          4294975488
+        vmsize:          4096
+        fileoff:         8192
+        filesize:        88
+        maxprot:         1
+        initprot:        1
+        nsects:          0
+        flags:           0
+    LinkEditData:
+      NameList:
+        - n_strx:          1
+          n_type:          0xF
+          n_sect:          1
+          n_desc:          0
+          n_value:         4294975360
+      StringTable:
+        - ' '
+        - _main
