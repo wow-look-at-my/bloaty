@@ -23,9 +23,10 @@ concurrency:
 #              no NEEDED entries. linux-clang stays dynamic as a sanity build.
 #   windows:   static CRT (/MT via CMAKE_MSVC_RUNTIME_LIBRARY) - only OS DLLs
 #              like KERNEL32 allowed; no vcruntime/msvcp/api-ms-win-crt-*.
-#   macos:     universal (arm64 + x86_64), deployment target 11.0, all deps
-#              vendored static; only /usr/lib + /System dylibs (a fully static
-#              Mach-O executable is unsupported by Apple - libSystem must be
+#   macos:     universal (arm64 + x86_64), deployment target 11.0, deps
+#              vendored static (zlib from the OS - see the macos Configure
+#              step); only /usr/lib + /System dylibs (a fully static Mach-O
+#              executable is unsupported by Apple - libSystem must be
 #              dynamic - so OS-dylibs-only is "as static as macOS allows").
 
 jobs:
@@ -162,8 +163,13 @@ jobs:
             ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
             ccache-1-macos-appleclang-
       - name: Configure
-        # Universal binary (arm64 + x86_64), min macOS 11.0, all deps vendored
-        # static: runs on any Mac >= 11. Tests below exercise the arm64 slice
+        # Universal binary (arm64 + x86_64), min macOS 11.0, deps vendored
+        # static: runs on any Mac >= 11. zlib is the exception: it comes from
+        # the OS (/usr/lib/libz.1.dylib ships with every macOS, is universal,
+        # and passes the /usr/lib allowlist below) because vendored zlib
+        # 1.2.11 does not compile under modern SDKs (its classic-MacOS
+        # 'fdopen' macro hack in zutil.h clashes with <stdio.h> when
+        # TARGET_OS_MAC is defined). Tests below exercise the arm64 slice
         # natively on this runner.
         run: >
           cmake -B build -G Ninja
@@ -175,7 +181,6 @@ jobs:
           -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
           -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
           -DBLOATY_PREFER_SYSTEM_RE2=NO
-          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
           -DBLOATY_PREFER_SYSTEM_ZSTD=NO
           -Dprotobuf_WITH_ZLIB=OFF
           -DFILECHECK_EXECUTABLE="$(brew --prefix llvm)/bin/FileCheck"
