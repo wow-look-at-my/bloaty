@@ -32,7 +32,14 @@
 #include "bloaty.pb.h"
 
 #if defined(_MSC_VER)
-#define PATH_MAX  4096
+#include <direct.h>  // For _getcwd()
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+#define getcwd _getcwd
+#else
+#include <unistd.h>  // For getcwd()
+#include <limits.h>  // For PATH_MAX
 #endif
 
 inline bool GetFileSize(const std::string& filename, uint64_t* size) {
@@ -53,7 +60,7 @@ inline std::string GetTestDirectory() {
     return "";
   }
   std::string path(pathbuf);
-  size_t pos = path.rfind('/');
+  size_t pos = path.find_last_of("/\\");
   return path.substr(pos + 1);
 }
 
