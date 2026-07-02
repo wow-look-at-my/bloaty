@@ -26,20 +26,27 @@ must be specified currently:
 - `-DFILECHECK_EXECUTABLE=<PATH>`: specifies where to find the FileCheck tool
 - `-DYAML2OBJ_EXECUTABLE=<PATH>`: specifies where to find the yaml2obj tool
 
-You can install lit via pip:
-```sh
-pip install --user lit
-```
-
-The FileCheck utility and yaml2obj currently need to be provided by the user.
-These are part of the LLVM toolchain and require a very recent build
-(development release from the main branch) to run the tests.
+Any reasonably recent LLVM release provides suitable tools (LLVM 18 is known
+to work). On Ubuntu/Debian, `apt-get install llvm-18 llvm-18-tools` provides
+all three — note that FileCheck is in `llvm-18-tools`, not `llvm-18`, and
+`llvm-18-tools` also ships a runnable lit, so no pip install is required:
 
 ```sh
-cmake -B build -G Ninja -S . -DLIT_EXECUTABLE=${HOME}/Library/Python/3.8/bin/lit -DFILECHECK_EXECUTABLE=${HOME}/BinaryCache/llvm.org/bin/FileCheck -DYAML2OBJ_EXECUTABLE=${HOME}/BinaryCache/llvm.org/bin/yaml2obj
-cmake --build build --config Debug
+cmake -B build -G Ninja -S . \
+    -DLIT_EXECUTABLE=/usr/lib/llvm-18/build/utils/lit/lit.py \
+    -DFILECHECK_EXECUTABLE=/usr/lib/llvm-18/bin/FileCheck \
+    -DYAML2OBJ_EXECUTABLE=/usr/lib/llvm-18/bin/yaml2obj
+cmake --build build
 cmake --build build --target check-bloaty
 ```
+
+On macOS, `brew install llvm` provides `FileCheck` and `yaml2obj` under
+`$(brew --prefix llvm)/bin`, and lit can be installed with
+`pip install --user lit`.
+
+Note: if any of the three tools is missing at configure time, the
+`check-bloaty` target is silently not created — "the build passed" does not
+imply the lit tests ran.
 
 
 ## C++ Tests
@@ -50,6 +57,12 @@ Going forward, C++ should only be used for tests that do not
 parse binary input files.  For example, C++ is good for
 testing Bloaty's data structures and aggregation/reporting
 logic.
+
+One deliberate exception: `bloaty_ingestion_test` parses checked-in fixtures
+of every supported format (see `tests/testdata/ingestion/README.md`). It
+exists precisely because it needs no LLVM tools at test time, so it can prove
+on every CI platform — including hosts without FileCheck/yaml2obj — that any
+OS can ingest any format.
 
 To run the C++ tests (Git only, these are not included in the release tarball), type:
 

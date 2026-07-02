@@ -1,7 +1,7 @@
 
 # Bloaty: a size profiler for binaries
 
-[![build](https://github.com/google/bloaty/actions/workflows/build.yml/badge.svg)](https://github.com/google/bloaty/actions/workflows/build.yml)
+[![CI](https://github.com/wow-look-at-my/bloaty/actions/workflows/ci.yml/badge.svg)](https://github.com/wow-look-at-my/bloaty/actions/workflows/ci.yml)
 
 Ever wondered what's making your binary big?  Bloaty will
 show you a size profile of the binary so you can understand
@@ -62,13 +62,21 @@ please see [How Bloaty Works](doc/how-bloaty-works.md).
 
 ## Install
 
-To build, use `cmake`. For example:
+To build, use `cmake` (3.16 or newer, including CMake 4.x) and a C++20
+compiler. For example:
 
 ```
 $ cmake -B build -G Ninja -S .
 $ cmake --build build
 $ cmake --build build --target install
 ```
+
+Bloaty builds and passes its full test suite on Linux (gcc and clang), macOS
+(AppleClang), and Windows (MSVC) — see
+[.github/workflows/ci.yml](.github/workflows/ci.yml). File-format support is
+host-independent: every platform can analyze every supported format (an ELF
+host can profile a Mach-O or PE binary and vice versa), and CI verifies this
+on every push.
 
 Bloaty bundles ``libprotobuf``, ``re2``, ``capstone``, and
 ``pkg-config`` as Git submodules, and uses ``protoc`` build
