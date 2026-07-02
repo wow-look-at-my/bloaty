@@ -81,9 +81,15 @@ enforcement steps: linux-gcc ships a fully static Release ELF (`-static`,
 all deps vendored; verified via ldd/readelf); windows ships a static-CRT exe
 (verified via dumpbin — no vcruntime/msvcp/api-ms-win-crt-* deps); macos
 ships `bloaty-macos-universal` (arm64+x86_64, deployment target 11.0, deps
-vendored; otool-verified to depend only on /usr/lib + /System dylibs, since
-Apple does not support fully static executables). linux-clang stays a
-dynamic RelWithDebInfo sanity build with no artifact.
+vendored **including the C++ runtime**: a pinned-LLVM source-built universal
+libc++.a/libc++abi.a replaces libc++.1.dylib, cached via actions/cache).
+The macOS binary is otool-verified per arch to depend on exactly two OS
+dylibs: `/usr/lib/libSystem.B.dylib` (XNU's only stable syscall ABI — Apple
+ships no static libSystem, and raw-syscall binaries break across macOS
+updates) and CoreFoundation (required by abseil cctz `local_time_zone()`,
+unconditional under `__APPLE__`; unremovable without patching the abseil
+submodule). linux-clang stays a dynamic RelWithDebInfo sanity build with no
+artifact.
 
 ## Layout
 

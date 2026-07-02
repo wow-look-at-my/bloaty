@@ -24,9 +24,16 @@ concurrency:
 #   windows:   static CRT (/MT via CMAKE_MSVC_RUNTIME_LIBRARY) - only OS DLLs
 #              like KERNEL32 allowed; no vcruntime/msvcp/api-ms-win-crt-*.
 #   macos:     universal (arm64 + x86_64), deployment target 11.0, all deps
-#              vendored static; only /usr/lib + /System dylibs (a fully static
-#              Mach-O executable is unsupported by Apple - libSystem must be
-#              dynamic - so OS-dylibs-only is "as static as macOS allows").
+#              vendored static INCLUDING the C++ runtime (a source-built
+#              universal libc++.a/libc++abi.a replaces libc++.1.dylib). The
+#              only dylibs are /usr/lib/libSystem.B.dylib and CoreFoundation:
+#              libSystem is XNU's sole stable syscall ABI (Apple ships no
+#              static libSystem; raw-syscall binaries break across macOS
+#              updates - see Go pre-1.11), and CoreFoundation is pulled in by
+#              abseil cctz's local_time_zone() (unconditional on __APPLE__;
+#              unremovable without patching the abseil submodule). Both ship
+#              with every macOS install, so this is "as static as macOS
+#              allows" - enforced to exactly those two, per arch.
 
 jobs:
   linux-gcc:
@@ -134,10 +141,14 @@ jobs:
 
   macos:
     runs-on: macos-latest  # arm64 (Apple Silicon), AppleClang
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 500M
+      # Pinned LLVM release used to source-build the static universal libc++
+      # that replaces /usr/lib/libc++.1.dylib in the shipped binary.
+      LIBCXX_LLVM_TAG: llvmorg-20.1.8
+      LIBCXX_STATIC_PREFIX: ${{ github.workspace }}/.libcxx-static
     steps:
       - uses: actions/checkout@v4
         with:
@@ -153,6 +164,44 @@ jobs:
         run: |
           ls -l "$(brew --prefix llvm)/bin/FileCheck" "$(brew --prefix llvm)/bin/yaml2obj"
           command -v lit
+      - name: Restore static libc++ cache
+        id: libcxx-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.libcxx-static
+          key: libcxx-static-1-${{ env.LIBCXX_LLVM_TAG }}-macos11.0
+      - name: Build static universal libc++ / libc++abi
+        # Apple ships no static C++ runtime (only libc++.1.dylib), and brew
+        # llvm's libc++.a is a single-arch bottle, so a universal static
+        # libc++ must be source-built: same deployment target and arch set
+        # as bloaty, shared libs off. The install tree (headers + libc++.a +
+        # libc++abi.a) is cached; warm runs skip this step entirely.
+        # _Unwind_* stays dynamic from libSystem (which reexports the OS
+        # unwinder) - that is below the C++ runtime and part of the OS ABI.
+        if: steps.libcxx-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          VER="${LIBCXX_LLVM_TAG#llvmorg-}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/llvm-project.tar.xz" \
+            "https://github.com/llvm/llvm-project/releases/download/${LIBCXX_LLVM_TAG}/llvm-project-${VER}.src.tar.xz"
+          tar -xf "$RUNNER_TEMP/llvm-project.tar.xz" -C "$RUNNER_TEMP"
+          cmake -S "$RUNNER_TEMP/llvm-project-${VER}.src/runtimes" \
+            -B "$RUNNER_TEMP/libcxx-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$LIBCXX_STATIC_PREFIX" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXX_ENABLE_STATIC=ON \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_STATIC=ON \
+            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            -DLIBCXX_INCLUDE_TESTS=OFF \
+            -DLIBCXXABI_INCLUDE_TESTS=OFF
+          cmake --build "$RUNNER_TEMP/libcxx-build" --parallel
+          cmake --install "$RUNNER_TEMP/libcxx-build"
+          lipo -info "$LIBCXX_STATIC_PREFIX/lib/libc++.a" "$LIBCXX_STATIC_PREFIX/lib/libc++abi.a"
       - name: Restore compiler cache
         uses: actions/cache@v4
         with:
@@ -167,12 +216,30 @@ jobs:
         # here: 1.2.11's classic-MacOS 'fdopen' macro hack in zutil.h broke
         # compilation under modern SDKs.) Tests below exercise the arm64
         # slice natively on this runner.
+        #
+        # The C++ runtime is linked statically from the source-built libc++:
+        #   - CXXFLAGS (appended to CMAKE_CXX_FLAGS by the top-level
+        #     CMakeLists, which otherwise overwrites that variable) swaps the
+        #     SDK's libc++ headers for the matching static-libc++ headers;
+        #   - -fno-typed-cxx-new-delete: AppleClang 21 emits typed operator
+        #     new by default, which aborts at startup when libc++abi is
+        #     linked statically ("typed operator new being invoked before
+        #     its static initializer in libcxx has been executed" - probed
+        #     on this exact runner image); the abort message prescribes
+        #     this flag;
+        #   - -nostdlib++ drops the driver's implicit -lc++;
+        #   - CMAKE_CXX_STANDARD_LIBRARIES appends libc++.a/libc++abi.a at
+        #     the end of every executable's link line (correct archive order).
+        env:
+          CXXFLAGS: -nostdinc++ -isystem ${{ env.LIBCXX_STATIC_PREFIX }}/include/c++/v1 -fno-typed-cxx-new-delete
         run: >
           cmake -B build -G Ninja
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
           -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_EXE_LINKER_FLAGS=-nostdlib++
+          -DCMAKE_CXX_STANDARD_LIBRARIES="$LIBCXX_STATIC_PREFIX/lib/libc++.a $LIBCXX_STATIC_PREFIX/lib/libc++abi.a"
           -DBLOATY_PREFER_SYSTEM_ABSL=NO
           -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
           -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
@@ -185,16 +252,40 @@ jobs:
           -DLIT_EXECUTABLE="$(command -v lit)"
       - name: Build
         run: cmake --build build --parallel
-      - name: Verify universal binary with OS-provided dylibs only
-        # Apple does not support fully static executables (libSystem must be
-        # dynamic), so enforce the equivalent: both arches present and every
-        # dependency under /usr/lib or /System (no Homebrew dylib leakage).
+      - name: Verify universal binary, libSystem + CoreFoundation only
+        # "As static as macOS allows", enforced per arch:
+        #   /usr/lib/libSystem.B.dylib - XNU's only stable syscall ABI; Apple
+        #     ships no static libSystem, and raw-syscall binaries break
+        #     across macOS updates (Go pre-1.11), so this is the floor.
+        #   CoreFoundation - required by abseil cctz local_time_zone()
+        #     (absl/time/internal/cctz/src/time_zone_lookup.cc, unconditional
+        #     #if defined(__APPLE__), reached via protobuf -> absl::log ->
+        #     absl::LocalTimeZone); unremovable without patching the abseil
+        #     submodule. An OS framework on every macOS install, same class
+        #     as libSystem.
+        # Everything else - including the C++ runtime - must be static:
+        # libc++.1.dylib in particular must NOT appear. Also enforce both
+        # arches and the 11.0 deployment target (LC_BUILD_VERSION minos).
         run: |
           lipo -info build/bloaty
           lipo -info build/bloaty | grep arm64
           lipo -info build/bloaty | grep x86_64
-          otool -L build/bloaty
-          ! (otool -L build/bloaty | grep -E '^[[:space:]]' | grep -vE '^[[:space:]]+(/usr/lib/|/System/)')
+          expected="$(printf '%s\n%s' \
+            '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation' \
+            '/usr/lib/libSystem.B.dylib')"
+          for arch in arm64 x86_64; do
+            echo "=== $arch ==="
+            otool -arch "$arch" -L build/bloaty
+            got="$(otool -arch "$arch" -L build/bloaty | tail -n +2 | awk '{print $1}' | sort)"
+            if [ "$got" != "$expected" ]; then
+              echo "FAIL: $arch dylib set is not exactly libSystem.B + CoreFoundation"
+              exit 1
+            fi
+            otool -arch "$arch" -l build/bloaty | grep -A4 LC_BUILD_VERSION | head -6
+            otool -arch "$arch" -l build/bloaty | grep -A4 LC_BUILD_VERSION | grep -q 'minos 11.0' || {
+              echo "FAIL: $arch minos is not 11.0"; exit 1;
+            }
+          done
       - name: Test (ctest)
         run: ctest --test-dir build --output-on-failure
       - name: Test (lit)
