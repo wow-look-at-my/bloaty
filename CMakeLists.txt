@@ -19,6 +19,12 @@ option(BLOATY_ENABLE_UBSAN "Enable undefined behavior sanitizer." OFF)
 option(BLOATY_ENABLE_CMAKETARGETS "Enable installing cmake target files." ON)
 option(BLOATY_ENABLE_BUILDID "Enable build id." ON)
 option(BLOATY_ENABLE_RE2 "Enable the support for regular expression functions." ON)
+# Link the bloaty executable fully statically (-static). Linux/ELF only; use
+# with the BLOATY_PREFER_SYSTEM_* options off so every dependency has a static
+# archive available. Scoped to the bloaty target (not global linker flags)
+# because vendored subprojects (zlib's example/minigzip) link their own shared
+# libs and cannot build under a global -static.
+option(BLOATY_STATIC_BINARY "Link the bloaty executable fully statically." OFF)
 option(BLOATY_PREFER_SYSTEM_ABSL "Prefer to use the system absl if available" YES)
 option(BLOATY_PREFER_SYSTEM_CAPSTONE "Prefer to use the system capstone if available" YES)
 option(BLOATY_PREFER_SYSTEM_PROTOBUF "Prefer to use the system protobuf if available" YES)
@@ -518,6 +524,9 @@ if(DEFINED ENV{LIB_FUZZING_ENGINE})
 else()
   add_executable(bloaty src/main.cc)
   target_link_libraries(bloaty ${LIBBLOATY_LIBS})
+  if(BLOATY_STATIC_BINARY)
+    target_link_options(bloaty PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
 
   set_property(TARGET bloaty PROPERTY FOLDER "bloaty")
 

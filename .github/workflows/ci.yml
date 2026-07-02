@@ -16,6 +16,17 @@ concurrency:
 # official LLVM release tarballs are not verified to ship them, and building
 # LLVM from source takes hours), so the Windows job is ctest-only; the
 # ingestion test still proves all-format parsing there.
+#
+# Artifact binaries are as static as each platform allows, so they run on any
+# machine of that OS/arch, and each artifact job *enforces* that:
+#   linux-gcc: fully static ELF (-static; all deps vendored) - no interpreter,
+#              no NEEDED entries. linux-clang stays dynamic as a sanity build.
+#   windows:   static CRT (/MT via CMAKE_MSVC_RUNTIME_LIBRARY) - only OS DLLs
+#              like KERNEL32 allowed; no vcruntime/msvcp/api-ms-win-crt-*.
+#   macos:     universal (arm64 + x86_64), deployment target 11.0, all deps
+#              vendored static; only /usr/lib + /System dylibs (a fully static
+#              Mach-O executable is unsupported by Apple - libSystem must be
+#              dynamic - so OS-dylibs-only is "as static as macOS allows").
 
 jobs:
   linux-gcc:
@@ -41,16 +52,35 @@ jobs:
             ccache-1-linux-gcc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
             ccache-1-linux-gcc-
       - name: Configure
+        # Release + fully static bloaty (glibc >= 2.34 on ubuntu-24.04 makes
+        # -static safe: libpthread is merged into libc, and bloaty uses no
+        # dlopen/NSS). All deps vendored so nothing links runner-provided
+        # libs; protobuf_WITH_ZLIB=OFF stops protobuf pulling in the system
+        # libz.so (bloaty never uses protobuf's gzip streams). The lit suite
+        # below runs against the static binary itself.
         run: >
           cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DBLOATY_STATIC_BINARY=ON
+          -DBLOATY_PREFER_SYSTEM_ABSL=NO
+          -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
+          -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
+          -DBLOATY_PREFER_SYSTEM_RE2=NO
+          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
+          -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+          -Dprotobuf_WITH_ZLIB=OFF
           -DFILECHECK_EXECUTABLE=/usr/lib/llvm-18/bin/FileCheck
           -DYAML2OBJ_EXECUTABLE=/usr/lib/llvm-18/bin/yaml2obj
           -DLIT_EXECUTABLE=/usr/lib/llvm-18/build/utils/lit/lit.py
       - name: Build
         run: cmake --build build --parallel
+      - name: Verify fully static binary
+        run: |
+          file build/bloaty
+          (ldd build/bloaty 2>&1 || true) | grep 'not a dynamic executable'
+          ! (readelf -d build/bloaty | grep NEEDED)
       - name: Test (ctest)
         run: ctest --test-dir build --output-on-failure
       - name: Test (lit)
@@ -132,15 +162,37 @@ jobs:
             ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
             ccache-1-macos-appleclang-
       - name: Configure
+        # Universal binary (arm64 + x86_64), min macOS 11.0, all deps vendored
+        # static: runs on any Mac >= 11. Tests below exercise the arm64 slice
+        # natively on this runner.
         run: >
           cmake -B build -G Ninja
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DBLOATY_PREFER_SYSTEM_ABSL=NO
+          -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
+          -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
+          -DBLOATY_PREFER_SYSTEM_RE2=NO
+          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
+          -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+          -Dprotobuf_WITH_ZLIB=OFF
           -DFILECHECK_EXECUTABLE="$(brew --prefix llvm)/bin/FileCheck"
           -DYAML2OBJ_EXECUTABLE="$(brew --prefix llvm)/bin/yaml2obj"
           -DLIT_EXECUTABLE="$(command -v lit)"
       - name: Build
         run: cmake --build build --parallel
+      - name: Verify universal binary with OS-provided dylibs only
+        # Apple does not support fully static executables (libSystem must be
+        # dynamic), so enforce the equivalent: both arches present and every
+        # dependency under /usr/lib or /System (no Homebrew dylib leakage).
+        run: |
+          lipo -info build/bloaty
+          lipo -info build/bloaty | grep arm64
+          lipo -info build/bloaty | grep x86_64
+          otool -L build/bloaty
+          ! (otool -L build/bloaty | grep -E '^[[:space:]]' | grep -vE '^[[:space:]]+(/usr/lib/|/System/)')
       - name: Test (ctest)
         run: ctest --test-dir build --output-on-failure
       - name: Test (lit)
@@ -149,7 +201,7 @@ jobs:
         run: ccache -s
       - uses: actions/upload-artifact@v4
         with:
-          name: bloaty-macos-arm64
+          name: bloaty-macos-universal
           path: build/bloaty
 
   windows:
@@ -194,6 +246,18 @@ jobs:
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build build --parallel
+      - name: Verify static CRT (OS DLLs only)
+        # CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded (/MT) statically links the
+        # CRT; the exe must not depend on vcruntime*/msvcp*/api-ms-win-crt-*
+        # redistributable DLLs. OS DLLs (KERNEL32 etc.) are unavoidable -
+        # that is as static as Windows allows.
+        shell: pwsh
+        run: |
+          $deps = (& dumpbin /dependents build\bloaty.exe) -join "`n"
+          Write-Host $deps
+          if ($deps -match '(?i)vcruntime|msvcp|api-ms-win-crt') {
+            throw "bloaty.exe depends on CRT redistributable DLLs (not statically linked)"
+          }
       - name: Test (ctest)
         # No lit here: FileCheck/yaml2obj have no cheap prebuilt source on
         # Windows. ctest includes bloaty_ingestion_test, which still proves

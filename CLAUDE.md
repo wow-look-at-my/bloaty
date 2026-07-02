@@ -70,12 +70,20 @@ target silently does not exist — a passing build does NOT mean lit ran.
 ## CI
 
 `.github/workflows/ci.yml`, trigger `on: push:`. Four jobs: linux-gcc,
-linux-clang, macos (AppleClang, arm64), windows (MSVC x64, Ninja, Release).
-All four run ctest (including the ingestion test — the all-formats-on-all-OSes
-proof); Linux and macOS also run the lit suite. Windows is ctest-only (no
-cheap prebuilt FileCheck/yaml2obj there). Only GitHub-owned actions are used;
-ccache + actions/cache make warm builds fast. The built binary is uploaded as
-an artifact per OS.
+linux-clang, macos (AppleClang, universal arm64+x86_64), windows (MSVC x64,
+Ninja, Release). All four run ctest (including the ingestion test — the
+all-formats-on-all-OSes proof); Linux and macOS also run the lit suite.
+Windows is ctest-only (no cheap prebuilt FileCheck/yaml2obj there). Only
+GitHub-owned actions are used; ccache + actions/cache make warm builds fast.
+
+Artifact binaries (one per OS) are "runs anywhere" static, with per-job
+enforcement steps: linux-gcc ships a fully static Release ELF (`-static`,
+all deps vendored; verified via ldd/readelf); windows ships a static-CRT exe
+(verified via dumpbin — no vcruntime/msvcp/api-ms-win-crt-* deps); macos
+ships `bloaty-macos-universal` (arm64+x86_64, deployment target 11.0, deps
+vendored; otool-verified to depend only on /usr/lib + /System dylibs, since
+Apple does not support fully static executables). linux-clang stays a
+dynamic RelWithDebInfo sanity build with no artifact.
 
 ## Layout
 
