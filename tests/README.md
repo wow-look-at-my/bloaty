@@ -54,7 +54,6 @@ Note: if any of the three tools is missing at configure time, the
 `check-bloaty` target is silently not created — "the build passed" does not
 imply the lit tests ran.
 
-
 ## C++ Tests
 
 The C++ tests are conventional C++ unit tests that use https://github.com/google/googletest.
