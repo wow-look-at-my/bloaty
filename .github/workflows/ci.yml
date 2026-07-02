@@ -3,6 +3,10 @@ name: CI
 on:
   push:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 # Every job builds bloaty and runs the full ctest suite, which includes
 # bloaty_ingestion_test: every OS parses fixtures of every supported format
 # (ELF, PE, Mach-O thin + universal, WASM, DWARF5) with no external tools.
@@ -111,7 +115,7 @@ jobs:
       - name: Install dependencies
         run: |
           brew install ccache ninja llvm
-          python3 -m pip install lit
+          pipx install lit
       - name: Check test tools
         # The lit suite needs FileCheck and yaml2obj; Homebrew's llvm formula
         # builds with -DLLVM_INSTALL_UTILS=ON, which ships both. Fail loudly
