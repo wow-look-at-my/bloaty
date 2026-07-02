@@ -636,8 +636,16 @@ static void ReadDWARFDebugInfo(dwarf::InfoReader& reader,
                                const DualMap& symbol_map, RangeSink* sink) {
   dwarf::CUIter iter = reader.GetCUIter(section);
   dwarf::CU cu;
-  cu.SetIndirectStringCallback([sink, &cu](string_view str) {
-    sink->AddFileRange("dwarf_strp", cu.unit_name(), str);
+  // Indirect string offsets repeat heavily, both within and across CUs (type
+  // names, file paths, ...), and RangeMap adds are first-wins, so an add for
+  // an already-seen string is a no-op after a full range lookup.  The data
+  // pointer identifies the string (same offset => same pointer), letting us
+  // skip repeats outright.  Only the first add happens, exactly as before.
+  std::unordered_set<const char*> seen_strs;
+  cu.SetIndirectStringCallback([sink, &cu, &seen_strs](string_view str) {
+    if (seen_strs.insert(str.data()).second) {
+      sink->AddFileRange("dwarf_strp", cu.unit_name(), str);
+    }
   });
 
   while (iter.NextCU(reader, &cu)) {
