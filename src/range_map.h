@@ -35,6 +35,7 @@
 #include <exception>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -52,13 +53,13 @@ class RangeMap {
   RangeMap& operator=(RangeMap& other) = delete;
 
   // Adds a range to this map.
-  void AddRange(uint64_t addr, uint64_t size, const std::string& val);
+  void AddRange(uint64_t addr, uint64_t size, std::string_view val);
 
   // Adds a range to this map (in domain D1) that also corresponds to a
   // different range in a different map (in domain D2).  The correspondance will
   // be noted to allow us to translate into the other domain later.
   void AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
-                    const std::string& val);
+                    std::string_view val);
 
   // Adds a range to this map (in domain D1), and also adds corresponding ranges
   // to |other| (in domain D2), using |translator| (in domain D1) to translate
@@ -71,7 +72,7 @@ class RangeMap {
   // contents of |this| and |other| are undefined (Bloaty will bail in this
   // case).
   bool AddRangeWithTranslation(uint64_t addr, uint64_t size,
-                               const std::string& val,
+                               std::string_view val,
                                const RangeMap& translator, bool verbose,
                                RangeMap* other);
 
@@ -109,7 +110,7 @@ class RangeMap {
 
   static std::string EntryDebugString(uint64_t addr, uint64_t size,
                                       uint64_t other_start,
-                                      const std::string& label) {
+                                      std::string_view label) {
     std::string end =
         size == kUnknownSize ? "?" : absl::StrCat(absl::Hex(addr + size));
     std::string ret = absl::StrCat("[", absl::Hex(addr), ", ", end,
@@ -158,7 +159,7 @@ class RangeMap {
   static const uint64_t kNoTranslation = UINT64_MAX;
 
   struct Entry {
-    Entry(const std::string& label_, uint64_t size_, uint64_t other_)
+    Entry(std::string_view label_, uint64_t size_, uint64_t other_)
         : label(label_), size(size_), other_start(other_) {}
     std::string label;
     uint64_t size;
@@ -200,7 +201,7 @@ class RangeMap {
   }
 
   template <class T>
-  void MaybeSetLabel(T iter, const std::string& label, uint64_t addr,
+  void MaybeSetLabel(T iter, std::string_view label, uint64_t addr,
                      uint64_t end);
 
   // When the size is unknown return |unknown| for the end.

@@ -143,12 +143,12 @@ std::string RangeMap::DebugString() const {
   return ret;
 }
 
-void RangeMap::AddRange(uint64_t addr, uint64_t size, const std::string& val) {
+void RangeMap::AddRange(uint64_t addr, uint64_t size, std::string_view val) {
   AddDualRange(addr, size, kNoTranslation, val);
 }
 
 template <class T>
-void RangeMap::MaybeSetLabel(T iter, const std::string& label, uint64_t addr,
+void RangeMap::MaybeSetLabel(T iter, std::string_view label, uint64_t addr,
                              uint64_t size) {
   assert(EntryContains(iter, addr));
   if (iter->second.size == kUnknownSize && size != kUnknownSize) {
@@ -179,10 +179,10 @@ void RangeMap::MaybeSetLabel(T iter, const std::string& label, uint64_t addr,
 }
 
 void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
-                            const std::string& label) {
+                            std::string_view label) {
   if (verbose_level > 2) {
-    printf("%p AddDualRange([%" PRIx64 ", %" PRIx64 "], %" PRIx64 ", %s)\n",
-           this, addr, size, otheraddr, label.c_str());
+    printf("%p AddDualRange([%" PRIx64 ", %" PRIx64 "], %" PRIx64 ", %.*s)\n",
+           this, addr, size, otheraddr, (int)label.size(), label.data());
   }
 
   if (size == 0) return;
@@ -251,7 +251,7 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
 // we could pass a parameter indicating whether such spanning is expected, and
 // warn if not.
 bool RangeMap::AddRangeWithTranslation(uint64_t addr, uint64_t size,
-                                       const std::string& val,
+                                       std::string_view val,
                                        const RangeMap& translator,
                                        bool verbose,
                                        RangeMap* other) {

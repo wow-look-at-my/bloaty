@@ -391,8 +391,27 @@ struct DisassemblyInfo {
   uint64_t start_address;
 };
 
+// Owns an open Capstone handle and instruction buffer, so that many functions
+// can be disassembled without repeating the (expensive) cs_open()/cs_malloc()
+// setup for each one.
+class CapstoneHandle {
+ public:
+  CapstoneHandle(cs_arch arch, cs_mode mode);
+  ~CapstoneHandle();
+  CapstoneHandle(const CapstoneHandle&) = delete;
+  CapstoneHandle& operator=(const CapstoneHandle&) = delete;
+
+  csh handle() const { return handle_; }
+  cs_insn* insn() const { return insn_; }
+
+ private:
+  csh handle_ = 0;
+  cs_insn* insn_ = nullptr;
+};
+
 std::string DisassembleFunction(const DisassemblyInfo& info);
-void DisassembleFindReferences(const DisassemblyInfo& info, RangeSink* sink);
+void DisassembleFindReferences(const CapstoneHandle& capstone,
+                               const DisassemblyInfo& info, RangeSink* sink);
 
 // Top-level API ///////////////////////////////////////////////////////////////
 
