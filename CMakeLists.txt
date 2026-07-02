@@ -1,9 +1,14 @@
-cmake_minimum_required(VERSION 3.5)
-cmake_policy(SET CMP0048 NEW)
-if(POLICY CMP0091)
-  cmake_policy(SET CMP0091 NEW)
-endif()
+cmake_minimum_required(VERSION 3.16)
 project (Bloaty VERSION 1.1)
+
+# Some vendored third_party projects (zlib) still declare a
+# cmake_minimum_required older than 3.5, which CMake >= 4.0 refuses to
+# configure at all.  Raise the policy floor for those subprojects so that a
+# stock `cmake` invocation works without any extra flags.  Users can still
+# override this from the command line.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)  # Group projects in visual studio
@@ -86,11 +91,28 @@ endif()
 
 # Helper function for checking out Git submodules.
 function(init_submodule PATH)
+  file(GLOB SUBMODULE_CONTENTS "${CMAKE_CURRENT_SOURCE_DIR}/${PATH}/*")
+  if(SUBMODULE_CONTENTS)
+    # Already checked out (or vendored by hand); nothing to do.
+    return()
+  endif()
   message(STATUS "initializing submodule ${PATH}")
   execute_process(
     COMMAND git submodule update --init --recursive "${PATH}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE GIT_SUBMODULE_RESULT
   )
+  file(GLOB SUBMODULE_CONTENTS "${CMAKE_CURRENT_SOURCE_DIR}/${PATH}/*")
+  if(NOT GIT_SUBMODULE_RESULT EQUAL 0 OR NOT SUBMODULE_CONTENTS)
+    message(FATAL_ERROR
+      "Checking out submodule ${PATH} failed (git exited with "
+      "'${GIT_SUBMODULE_RESULT}').\n"
+      "Run:\n"
+      "  git submodule update --init --recursive\n"
+      "in ${CMAKE_CURRENT_SOURCE_DIR} and re-run cmake. If this source tree "
+      "was not cloned with git (e.g. a release tarball), download the "
+      "dependency into ${PATH} manually.")
+  endif()
 endfunction()
 
 # Add third_party libraries, disabling as much as we can of their builds.
