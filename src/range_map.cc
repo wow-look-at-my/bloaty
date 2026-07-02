@@ -251,6 +251,9 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
       printf("  added entry: %s\n", EntryDebugString(iter).c_str());
     }
     CheckConsistency(iter);
+    // The btree insert invalidated |it|; re-derive it from the returned
+    // iterator (the new entry sits immediately before the old |it|).
+    it = std::next(iter);
     addr = this_end;
   }
 }
@@ -310,7 +313,10 @@ void RangeMap::Compress() {
         (prev->second.label == it->second.label ||
          (!prev->second.HasFallbackLabel() && it->second.IsShortFallback()))) {
       prev->second.size += it->second.size;
-      mappings_.erase(it++);
+      // The btree erase invalidates iterators; re-derive both from the
+      // returned successor (the merged-into entry directly precedes it).
+      it = mappings_.erase(it);
+      prev = std::prev(it);
     } else {
       prev = it;
       ++it;

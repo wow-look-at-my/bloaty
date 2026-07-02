@@ -33,13 +33,13 @@
 #include <stdint.h>
 
 #include <exception>
-#include <map>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/strings/str_cat.h"
 
 namespace bloaty {
@@ -181,7 +181,11 @@ class RangeMap {
     bool IsShortFallback() const { return size <= 16 && HasFallbackLabel(); }
   };
 
-  typedef std::map<uint64_t, Entry> Map;
+  // A btree instead of std::map: multi-entry nodes need ~4x fewer cache-line
+  // touches per descent and no per-entry allocation.  Unlike std::map,
+  // insert/erase invalidate iterators, so mutation sites must refresh any
+  // iterator they keep using (AddDualRange, Compress).
+  typedef absl::btree_map<uint64_t, Entry> Map;
   Map mappings_;
 
   // Transparent hash/equality so labels_ can be probed with a string_view

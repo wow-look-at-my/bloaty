@@ -508,6 +508,7 @@ if(UNIX OR MINGW)
   endif()
 endif()
 
+list(APPEND LIBBLOATY_DEPS absl::btree)
 list(APPEND LIBBLOATY_DEPS absl::strings)
 list(APPEND LIBBLOATY_DEPS absl::optional)
 list(APPEND LIBBLOATY_DEPS absl::demangle_internal)
