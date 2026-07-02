@@ -35,7 +35,9 @@
 #include <exception>
 #include <map>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -127,7 +129,7 @@ class RangeMap {
       return "[end]";
     } else {
       return EntryDebugString(it->first, it->second.size,
-                              it->second.other_start, it->second.label);
+                              it->second.other_start, *it->second.label);
     }
   }
 
@@ -145,7 +147,7 @@ class RangeMap {
   template <class Func>
   void ForEachRangeWithStart(uint64_t start, Func func) const {
     for (auto iter = FindContaining(start); iter != mappings_.end(); ++iter) {
-      if (!func(iter->second.label, iter->first,
+      if (!func(*iter->second.label, iter->first,
                 RangeEnd(iter) - iter->first)) {
         return;
       }
@@ -159,14 +161,19 @@ class RangeMap {
   static const uint64_t kNoTranslation = UINT64_MAX;
 
   struct Entry {
-    Entry(std::string_view label_, uint64_t size_, uint64_t other_)
+    Entry(const std::string* label_, uint64_t size_, uint64_t other_)
         : label(label_), size(size_), other_start(other_) {}
-    std::string label;
+    // Interned: points into labels_, which deduplicates the (often highly
+    // repetitive) label strings instead of storing a copy per entry.  Within
+    // one RangeMap, labels are equal iff their pointers are equal.
+    const std::string* label;
     uint64_t size;
     uint64_t other_start;  // kNoTranslation if there is no mapping.
 
     bool HasTranslation() const { return other_start != kNoTranslation; }
-    bool HasFallbackLabel() const { return !label.empty() && label[0] == '['; }
+    bool HasFallbackLabel() const {
+      return !label->empty() && (*label)[0] == '[';
+    }
 
     // We assume that short regions that were unattributed (have fallback
     // labels) are actually padding. We could probably make this heuristic
@@ -176,6 +183,36 @@ class RangeMap {
 
   typedef std::map<uint64_t, Entry> Map;
   Map mappings_;
+
+  // Transparent hash/equality so labels_ can be probed with a string_view
+  // without materializing a std::string.
+  struct LabelHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const {
+      return std::hash<std::string_view>()(s);
+    }
+  };
+  struct LabelEq {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const {
+      return a == b;
+    }
+  };
+
+  // Owns one copy of each distinct label used by entries of this map.
+  // Element addresses are stable across insertion and container moves, so
+  // Entry::label pointers stay valid for the lifetime of the RangeMap.
+  std::unordered_set<std::string, LabelHash, LabelEq> labels_;
+
+  // Returns the address of the interned copy of |label| (inserting it if
+  // needed).
+  const std::string* InternLabel(std::string_view label) {
+    auto it = labels_.find(label);
+    if (it == labels_.end()) {
+      it = labels_.emplace(label).first;
+    }
+    return &*it;
+  }
 
   template <class T>
   void CheckConsistency(T iter) const {
@@ -336,7 +373,7 @@ void RangeMap::ComputeRollup(const std::vector<const RangeMap*>& range_maps,
           assert(false);
           throw std::runtime_error("No more ranges.");
         }
-        keys.push_back(iters[i]->second.label);
+        keys.push_back(*iters[i]->second.label);
       }
     }
 
@@ -380,7 +417,7 @@ void RangeMap::ComputeRollup(const std::vector<const RangeMap*>& range_maps,
           continuous = false;
         } else {
           assert(continuous);
-          keys[i] = iter->second.label;
+          keys[i] = *iter->second.label;
         }
       }
       current = next_break;

@@ -99,7 +99,7 @@ bool RangeMap::TryGetLabel(uint64_t addr, std::string* label) const {
   if (iter == mappings_.end()) {
     return false;
   } else {
-    *label = iter->second.label;
+    *label = *iter->second.label;
     return true;
   }
 }
@@ -114,9 +114,11 @@ bool RangeMap::TryGetLabelForRange(uint64_t addr, uint64_t size,
   if (iter == mappings_.end()) {
     return false;
   } else {
-    *label = iter->second.label;
+    // Labels are interned per-map, so pointer equality <=> string equality.
+    const std::string* first_label = iter->second.label;
+    *label = *first_label;
     while (iter != mappings_.end() && iter->first + iter->second.size < end) {
-      if (iter->second.label != *label) {
+      if (iter->second.label != first_label) {
         return false;
       }
       ++iter;
@@ -189,13 +191,24 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
 
   auto it = FindContainingOrAfter(addr);
 
+  // Intern the label lazily: only calls that actually insert an entry pay for
+  // the lookup, and repeated segments of one range intern just once.
+  const std::string* interned = nullptr;
+  auto intern = [&]() {
+    if (interned == nullptr) {
+      interned = InternLabel(label);
+    }
+    return interned;
+  };
+
   if (size == kUnknownSize) {
     assert(otheraddr == kNoTranslation);
     if (it != mappings_.end() && EntryContainsStrict(it, addr)) {
       MaybeSetLabel(it, label, addr, kUnknownSize);
     } else {
       auto iter = mappings_.emplace_hint(
-          it, std::make_pair(addr, Entry(label, kUnknownSize, kNoTranslation)));
+          it,
+          std::make_pair(addr, Entry(intern(), kUnknownSize, kNoTranslation)));
       if (verbose_level > 2) {
         printf("  added entry: %s\n", EntryDebugString(iter).c_str());
       }
@@ -233,7 +246,7 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
                                                    : addr - base + otheraddr;
     assert(this_end >= addr);
     auto iter = mappings_.emplace_hint(
-        it, std::make_pair(addr, Entry(label, this_end - addr, other)));
+        it, std::make_pair(addr, Entry(intern(), this_end - addr, other)));
     if (verbose_level > 2) {
       printf("  added entry: %s\n", EntryDebugString(iter).c_str());
     }
@@ -292,6 +305,7 @@ void RangeMap::Compress() {
   auto prev = mappings_.begin();
   auto it = prev;
   while (it != mappings_.end()) {
+    // Labels are interned per-map, so pointer equality <=> string equality.
     if (prev->first + prev->second.size == it->first &&
         (prev->second.label == it->second.label ||
          (!prev->second.HasFallbackLabel() && it->second.IsShortFallback()))) {
