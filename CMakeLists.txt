@@ -541,13 +541,26 @@ else()
     find_program(LIT_EXECUTABLE NAMES lit-script.py lit.py lit)
     find_program(FILECHECK_EXECUTABLE FileCheck)
     find_program(YAML2OBJ_EXECUTABLE yaml2obj)
-    if(Python_FOUND AND LIT_EXECUTABLE AND FILECHECK_EXECUTABLE AND YAML2OBJ_EXECUTABLE)
+    # A lit *.py source script (e.g. LLVM's utils/lit/lit.py, which apt's
+    # llvm-XX-tools ships) must be run through a Python interpreter. An
+    # installed `lit` entry point (pip/pipx/brew) must instead be exec'd
+    # directly: its shebang selects the interpreter it was installed for
+    # (possibly inside a venv), and forcing ${Python_EXECUTABLE} onto it
+    # bypasses that isolation and fails with "No module named 'lit'".
+    if(LIT_EXECUTABLE MATCHES "\\.py$")
+      set(LIT_COMMAND ${Python_EXECUTABLE} ${LIT_EXECUTABLE})
+      set(LIT_COMMAND_FOUND ${Python_FOUND})
+    else()
+      set(LIT_COMMAND ${LIT_EXECUTABLE})
+      set(LIT_COMMAND_FOUND ${LIT_EXECUTABLE})
+    endif()
+    if(LIT_COMMAND_FOUND AND FILECHECK_EXECUTABLE AND YAML2OBJ_EXECUTABLE)
       set(BLOATY_SRC_DIR ${PROJECT_SOURCE_DIR})
       set(BLOATY_OBJ_DIR ${PROJECT_BINARY_DIR})
       configure_file(tests/lit.site.cfg.in tests/lit.site.cfg @ONLY)
 
       add_custom_target(check-bloaty
-        COMMAND ${Python_EXECUTABLE} ${LIT_EXECUTABLE} -sv ${PROJECT_BINARY_DIR}/tests --param bloaty=$<TARGET_FILE:bloaty>
+        COMMAND ${LIT_COMMAND} -sv ${PROJECT_BINARY_DIR}/tests --param bloaty=$<TARGET_FILE:bloaty>
         DEPENDS
           bloaty
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/lit.cfg

@@ -42,7 +42,13 @@ cmake --build build --target check-bloaty
 
 On macOS, `brew install llvm` provides `FileCheck` and `yaml2obj` under
 `$(brew --prefix llvm)/bin`, and lit can be installed with
-`pip install --user lit`.
+`pip install --user lit` or `pipx install lit`.
+
+`LIT_EXECUTABLE` accepts either form of lit: LLVM's `lit.py` source script
+(CMake runs it through the Python interpreter it finds), or an installed
+`lit` entry point such as the pip/pipx ones above (CMake executes it
+directly, so the entry point's own shebang — and therefore its venv, in the
+pipx case — is respected).
 
 Note: if any of the three tools is missing at configure time, the
 `check-bloaty` target is silently not created — "the build passed" does not
