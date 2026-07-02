@@ -1,0 +1,410 @@
+## TEMPORARY probe workflow -- manual dispatch only, never runs on push.
+## Purpose: gather hard evidence from a real macOS runner about
+##   (1) what the toolchain/kernel do TODAY with fully static (zero-dylib)
+##       Mach-O executables (raw XNU syscalls, no libSystem), and
+##   (2) exactly which symbols pull CoreFoundation + libc++.1.dylib into the
+##       bloaty binary, plus whether brew's static libc++ archives are usable.
+## Delete this file once the probe results are captured.
+
+name: macOS static probe
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: probe-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash {0}  # no -e/-o pipefail: probe steps must run to completion
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Runner and toolchain info
+        continue-on-error: true
+        run: |
+          set -x
+          sw_vers
+          uname -a
+          xcode-select -p
+          xcrun --show-sdk-path
+          xcrun --show-sdk-version
+          clang --version
+          ld -v 2>&1 | head -5
+          ls "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/" | grep -E '^ld' || true
+          sysctl hw.ncpu hw.memsize machdep.cpu.brand_string 2>/dev/null || true
+
+      - name: 'probe a: clang -static hello.c (capture exact linker error)'
+        continue-on-error: true
+        run: |
+          set -x
+          mkdir -p "$RUNNER_TEMP/probe" && cd "$RUNNER_TEMP/probe"
+          cat > hello.c <<'EOF'
+          #include <stdio.h>
+          int main(void) { printf("hello from libc\n"); return 0; }
+          EOF
+          echo "=== PROBE a1: clang -static hello.c ==="
+          clang -static hello.c -o hello_static
+          echo "PROBE-RESULT a1: rc=$?"
+          echo "=== PROBE a2: static libraries shipped in the SDK (expect none for libc) ==="
+          find "$(xcrun --show-sdk-path)/usr/lib" -maxdepth 2 -name '*.a' 2>/dev/null || true
+          echo "=== PROBE a3: is there any libSystem archive anywhere in the SDK? ==="
+          find "$(xcrun --show-sdk-path)" -name 'libSystem*' -maxdepth 3 2>/dev/null || true
+
+      - name: 'probe b: dynamic baseline'
+        continue-on-error: true
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/probe"
+          clang hello.c -o h_dyn && ./h_dyn
+          echo "PROBE-RESULT b: run rc=$?"
+          otool -L h_dyn
+          otool -l h_dyn | grep -E -A4 'LC_MAIN|LC_LOAD_DYLINKER' || true
+
+      - name: 'probe c: CROWN JEWEL - zero-dylib raw-syscall static Mach-O (arm64)'
+        continue-on-error: true
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/probe"
+          cat > hello_raw.s <<'EOF'
+          .text
+          .globl _start
+          .p2align 2
+          _start:
+              mov x16, #4
+              mov x0, #1
+              adrp x1, msg@PAGE
+              add x1, x1, msg@PAGEOFF
+              mov x2, #14
+              svc #0x80
+              mov x16, #1
+              mov x0, #0
+              svc #0x80
+
+          .section __TEXT,__cstring
+          msg:
+              .ascii "hello, kernel\n"
+          EOF
+          clang -c hello_raw.s -o hello_raw.o || exit 0
+          SDKV="$(xcrun --show-sdk-version)"
+          echo "=== PROBE c-link v1: ld -static -e _start ==="
+          ld -o hello_raw hello_raw.o -static -e _start -arch arm64
+          echo "PROBE-RESULT c-link v1 rc=$?"
+          if [ ! -f hello_raw ]; then
+            echo "=== PROBE c-link v2: + -platform_version macos 11.0 $SDKV ==="
+            ld -o hello_raw hello_raw.o -static -e _start -arch arm64 -platform_version macos 11.0 "$SDKV"
+            echo "PROBE-RESULT c-link v2 rc=$?"
+          fi
+          if [ ! -f hello_raw ]; then
+            LDCLASSIC="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic"
+            echo "=== PROBE c-link v3: ld-classic ==="
+            "$LDCLASSIC" -o hello_raw hello_raw.o -static -e _start -arch arm64 -platform_version macos 11.0 "$SDKV"
+            echo "PROBE-RESULT c-link v3 rc=$?"
+          fi
+          [ -f hello_raw ] || { echo "PROBE-RESULT c: ALL LINK VARIANTS FAILED"; exit 0; }
+          ls -l hello_raw && size hello_raw
+          echo "=== PROBE c: otool -hv ==="
+          otool -hv hello_raw
+          echo "=== PROBE c: otool -L (expect ZERO dylib load commands) ==="
+          otool -L hello_raw
+          echo "=== PROBE c: load commands of interest ==="
+          otool -l hello_raw | grep -E -B1 -A6 'LC_MAIN|LC_UNIXTHREAD|LC_LOAD_DYLINKER|LC_BUILD_VERSION|LC_CODE_SIGNATURE' || true
+          echo "=== PROBE c: codesign state as produced by ld ==="
+          codesign -dv hello_raw 2>&1
+          if ! codesign -dv hello_raw >/dev/null 2>&1; then
+            echo "PROBE: ld did not sign; ad-hoc signing now"
+            codesign -s - hello_raw && codesign -dv hello_raw 2>&1
+          fi
+          echo "=== PROBE c: EXECUTING zero-dylib static Mach-O ==="
+          ./hello_raw
+          rc=$?
+          echo "PROBE-RESULT c-run: exit=$rc (0 means IT RUNS TODAY)"
+          if [ "$rc" -ge 128 ]; then
+            sudo log show --last 5m --style compact --predicate 'eventMessage CONTAINS[c] "hello_raw"' 2>&1 | tail -30 || true
+          fi
+          echo "=== PROBE c2: same binary with signature stripped (does the kernel kill unsigned arm64?) ==="
+          cp hello_raw hello_raw_unsigned
+          codesign --remove-signature hello_raw_unsigned 2>&1
+          ./hello_raw_unsigned
+          echo "PROBE-RESULT c2-run-unsigned: exit=$? (expect 128+SIGKILL=137 on arm64)"
+
+      - name: 'probe d1: raw getpid + mmap syscalls in static binary (arm64)'
+        continue-on-error: true
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/probe"
+          cat > start_call.s <<'EOF'
+          .text
+          .globl _start
+          .p2align 2
+          _start:
+              bl _probe_main
+              mov x16, #1
+              svc #0x80
+          EOF
+          cat > probe_syscalls.c <<'EOF'
+          typedef unsigned long ulong_t;
+          static inline long sc6(long n, long a, long b, long c, long d, long e, long f) {
+            register long x16 __asm__("x16") = n;
+            register long x0 __asm__("x0") = a;
+            register long x1 __asm__("x1") = b;
+            register long x2 __asm__("x2") = c;
+            register long x3 __asm__("x3") = d;
+            register long x4 __asm__("x4") = e;
+            register long x5 __asm__("x5") = f;
+            __asm__ volatile("svc #0x80"
+                             : "+r"(x0), "+r"(x1)
+                             : "r"(x16), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+                             : "memory", "cc");
+            return x0;
+          }
+          static long sc1(long n, long a) { return sc6(n, a, 0, 0, 0, 0, 0); }
+          static long sc3(long n, long a, long b, long c) { return sc6(n, a, b, c, 0, 0, 0); }
+          static void putstr(const char* s) {
+            long len = 0;
+            while (s[len]) len++;
+            sc3(4, 1, (long)s, len);
+          }
+          static void puthex(ulong_t v) {
+            char buf[19];
+            buf[0] = '0'; buf[1] = 'x';
+            for (int i = 0; i < 16; i++) {
+              int nib = (int)((v >> (60 - 4 * i)) & 0xf);
+              buf[2 + i] = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10);
+            }
+            buf[18] = '\n';
+            sc3(4, 1, (long)buf, 19);
+          }
+          long probe_main(void) {
+            putstr("getpid -> ");
+            puthex((ulong_t)sc1(20, 0));
+            putstr("mmap 16k anon rw -> ");
+            long p = sc6(197, 0, 16384, 3, 0x1002, -1, 0);
+            puthex((ulong_t)p);
+            if (p > 4096 && (p & 0xfff) == 0) {
+              *(volatile long*)p = 0x1234abcd;
+              putstr("mmap write+readback -> ");
+              puthex((ulong_t)*(volatile long*)p);
+            }
+            putstr("syscall probe done\n");
+            return 0;
+          }
+          EOF
+          clang -c start_call.s -o start_call.o
+          clang -c -O1 -ffreestanding -fno-stack-protector -fno-builtin probe_syscalls.c -o probe_syscalls.o
+          ld -o probe_syscalls start_call.o probe_syscalls.o -static -e _start -arch arm64 || \
+            ld -o probe_syscalls start_call.o probe_syscalls.o -static -e _start -arch arm64 -platform_version macos 11.0 "$(xcrun --show-sdk-version)"
+          [ -f probe_syscalls ] || { echo "PROBE-RESULT d1: link failed"; exit 0; }
+          codesign -dv probe_syscalls >/dev/null 2>&1 || codesign -s - probe_syscalls
+          otool -L probe_syscalls
+          ./probe_syscalls
+          echo "PROBE-RESULT d1: exit=$?"
+
+      - name: 'probe d2: __thread TLS in a zero-dylib static binary (arm64)'
+        continue-on-error: true
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/probe"
+          cat > tls_probe.c <<'EOF'
+          static __thread long tls_var = 0x42;
+          long probe_main(void) {
+            tls_var += 1;
+            return tls_var;
+          }
+          EOF
+          clang -c -O0 -ffreestanding -fno-stack-protector tls_probe.c -o tls_probe.o
+          echo "=== PROBE d2: undefined symbols the compiler emits for a TLS access ==="
+          nm -u tls_probe.o
+          echo "=== PROBE d2a: link WITHOUT any tlv runtime (capture exact error) ==="
+          ld -o tls_static_a start_call.o tls_probe.o -static -e _start -arch arm64
+          echo "PROBE-RESULT d2a: rc=$? (expect undefined __tlv_bootstrap)"
+          echo "=== PROBE d2b: link WITH a 10-line single-threaded tlv_bootstrap shim ==="
+          cat > tlv_stub.c <<'EOF'
+          typedef struct {
+            void* (*thunk)(void*);
+            unsigned long key;
+            unsigned long offset;
+          } TLVDescriptor;
+          extern char tls_image_start __asm__("section$start$__DATA$__thread_data");
+          void* _tlv_bootstrap(void* d_) {
+            TLVDescriptor* d = (TLVDescriptor*)d_;
+            return &tls_image_start + d->offset;
+          }
+          EOF
+          clang -c -O1 -ffreestanding -fno-stack-protector tlv_stub.c -o tlv_stub.o
+          ld -o tls_static_b start_call.o tls_probe.o tlv_stub.o -static -e _start -arch arm64
+          echo "PROBE-RESULT d2b-link: rc=$?"
+          [ -f tls_static_b ] || exit 0
+          codesign -dv tls_static_b >/dev/null 2>&1 || codesign -s - tls_static_b
+          otool -L tls_static_b
+          ./tls_static_b
+          echo "PROBE-RESULT d2b-run: exit=$? (67 = 0x43 means TLS access worked via shim; 139 = segfault)"
+
+      - name: 'probe e: raw-syscall static x86_64 slice under Rosetta'
+        continue-on-error: true
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/probe"
+          cat > hello_raw_x64.s <<'EOF'
+          .text
+          .globl _start
+          _start:
+              movq $0x2000004, %rax
+              movq $1, %rdi
+              leaq msg(%rip), %rsi
+              movq $14, %rdx
+              syscall
+              movq $0x2000001, %rax
+              xorl %edi, %edi
+              syscall
+
+          .section __TEXT,__cstring
+          msg:
+              .ascii "hello, kernel\n"
+          EOF
+          clang -arch x86_64 -c hello_raw_x64.s -o hello_raw_x64.o
+          ld -o hello_raw_x64 hello_raw_x64.o -static -e _start -arch x86_64 || \
+            ld -o hello_raw_x64 hello_raw_x64.o -static -e _start -arch x86_64 -platform_version macos 11.0 "$(xcrun --show-sdk-version)"
+          [ -f hello_raw_x64 ] || { echo "PROBE-RESULT e: link failed"; exit 0; }
+          otool -L hello_raw_x64
+          codesign -dv hello_raw_x64 >/dev/null 2>&1 || codesign -s - hello_raw_x64
+          arch -x86_64 ./hello_raw_x64
+          rc=$?
+          echo "PROBE-RESULT e-run: exit=$rc"
+          if [ "$rc" -ne 0 ]; then
+            /usr/bin/pgrep oahd >/dev/null 2>&1 && echo "PROBE: rosetta daemon present" || echo "PROBE: rosetta daemon NOT present"
+          fi
+
+      - name: Install dependencies (brew)
+        continue-on-error: true
+        run: brew install ccache ninja llvm
+
+      - name: 'probe f0: brew llvm static c++ archives - existence and archs'
+        continue-on-error: true
+        run: |
+          set -x
+          BREW_LLVM="$(brew --prefix llvm)"
+          "$BREW_LLVM/bin/clang++" --version | head -2
+          echo "=== PROBE f0: static c++/unwind archives in brew llvm ==="
+          find "$BREW_LLVM/lib" \( -name 'libc++*.a' -o -name 'libunwind*.a' \) -print 2>/dev/null
+          find "$BREW_LLVM/lib" \( -name 'libc++*.a' -o -name 'libunwind*.a' \) -print0 2>/dev/null | \
+            while IFS= read -r -d '' f; do echo "== $f"; lipo -info "$f"; done
+          echo "=== PROBE f0: does Xcode/CLT toolchain ship any libc++ archive? ==="
+          find "$(xcode-select -p)" -name 'libc++*.a' -maxdepth 6 2>/dev/null || true
+
+      - name: 'probe f2: AppleClang + SDK headers + brew libc++.a link test (route i)'
+        continue-on-error: true
+        run: |
+          set -x
+          cd "$RUNNER_TEMP/probe"
+          BREW_LLVM="$(brew --prefix llvm)"
+          CXXA="$(find "$BREW_LLVM/lib" -name 'libc++.a' | head -1)"
+          ABIA="$(find "$BREW_LLVM/lib" -name 'libc++abi.a' | head -1)"
+          echo "PROBE f2: libc++.a=$CXXA libc++abi.a=$ABIA"
+          [ -n "$CXXA" ] || { echo "PROBE-RESULT f2: no static libc++ in brew llvm"; exit 0; }
+          cat > cxxtest.cc <<'EOF'
+          #include <iostream>
+          #include <stdexcept>
+          #include <string>
+          #include <thread>
+          int main() {
+            std::string s = "static libc++ works, thread=";
+            try { throw std::runtime_error(s); } catch (const std::exception& e) { std::cout << e.what(); }
+            std::thread t([] { std::cout << "yes" << std::endl; });
+            t.join();
+            return 0;
+          }
+          EOF
+          echo "=== PROBE f2a: arm64 link with AppleClang + SDK headers + brew archives ==="
+          clang++ cxxtest.cc -o cxxtest_arm64 -nostdlib++ "$CXXA" "$ABIA"
+          echo "PROBE-RESULT f2a-link: rc=$?"
+          if [ -f cxxtest_arm64 ]; then otool -L cxxtest_arm64 && ./cxxtest_arm64; echo "PROBE-RESULT f2a-run: rc=$?"; fi
+          echo "=== PROBE f2b: x86_64 link against the same archives (expect arch failure if arm64-only) ==="
+          clang++ -arch x86_64 cxxtest.cc -o cxxtest_x64 -nostdlib++ "$CXXA" "$ABIA"
+          echo "PROBE-RESULT f2b-link: rc=$?"
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-macos-appleclang-
+
+      - name: Configure bloaty (same flags as CI macos job)
+        continue-on-error: true
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DBLOATY_PREFER_SYSTEM_ABSL=NO
+          -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
+          -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
+          -DBLOATY_PREFER_SYSTEM_RE2=NO
+          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
+          -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+          -Dprotobuf_WITH_ZLIB=OFF
+
+      - name: Build bloaty
+        continue-on-error: true
+        run: cmake --build build --parallel
+
+      - name: 'probe f1: bloaty dylib deps + undefined-symbol census'
+        continue-on-error: true
+        run: |
+          set -x
+          echo "=== PROBE f1: otool -L (universal header view) ==="
+          otool -L build/bloaty
+          for arch in arm64 x86_64; do
+            echo "=== PROBE f1[$arch]: otool -L ==="
+            otool -arch "$arch" -L build/bloaty
+            echo "=== PROBE f1[$arch]: undefined symbols grouped by source dylib ==="
+            nm -m -arch "$arch" build/bloaty | grep 'undefined' | grep -o 'from [^)]*' | sort | uniq -c | sort -rn
+            echo "=== PROBE f1[$arch]: undefined CoreFoundation symbols (VERBATIM) ==="
+            nm -m -arch "$arch" build/bloaty | grep -i 'CoreFoundation' || echo "PROBE: none"
+          done
+
+      - name: 'probe f1b: relink bloaty with -why_load + link map (who pulls CF?)'
+        continue-on-error: true
+        run: |
+          set -x
+          cd build
+          LINKCMD="$(ninja -t commands bloaty | tail -1)"
+          echo "$LINKCMD"
+          eval "$LINKCMD -Wl,-map,$RUNNER_TEMP/bloaty.map -Wl,-why_load" 2> "$RUNNER_TEMP/whyload.txt"
+          echo "PROBE f1b: relink rc=$?"
+          echo "=== PROBE f1b: why_load lines mentioning time_zone (who pulls time_zone_lookup.o) ==="
+          grep -n -i 'time_zone' "$RUNNER_TEMP/whyload.txt" | head -30 || echo "PROBE: no why_load time_zone lines"
+          echo "=== PROBE f1b: first 40 why_load lines (format sample) ==="
+          head -40 "$RUNNER_TEMP/whyload.txt"
+          echo "=== PROBE f1b: link map - object files mentioning time_zone ==="
+          grep -n -i 'time_zone' "$RUNNER_TEMP/bloaty.map" | head -20 || echo none
+          echo "=== PROBE f1b: link map - CoreFoundation mentions ==="
+          grep -n -i 'corefounda' "$RUNNER_TEMP/bloaty.map" | head -20 || echo none
+
+      - name: Upload probe outputs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-static-probe-outputs
+          path: |
+            ${{ runner.temp }}/probe
+            ${{ runner.temp }}/bloaty.map
+            ${{ runner.temp }}/whyload.txt
+          if-no-files-found: ignore
