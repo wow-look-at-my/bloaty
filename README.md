@@ -94,6 +94,37 @@ $ git submodule update --init --recursive
 To run the tests, see the info in
 [tests/README.md](tests/README.md).
 
+### One-file build for every OS (Actually Portable Executable)
+
+Bloaty also builds as a single [Cosmopolitan](https://github.com/jart/cosmopolitan)
+APE binary: one ~27MB file containing both x86_64 and aarch64 code that runs
+natively on Linux, macOS (including Apple Silicon), Windows (rename to
+`bloaty.exe`), and the BSDs, with zero dynamic library dependencies — on macOS
+it does not even link libSystem (a tiny loader is self-extracted and compiled
+once on first run).
+
+Download [cosmocc](https://cosmo.zip/pub/cosmocc/cosmocc.zip), unzip it to
+`$COSMO`, `chmod +x $COSMO/bin/cosmoranlib` (the zip drops the bit), then:
+
+```
+$ PATH="$COSMO/bin:$PATH" CXXFLAGS="-D__HAIKU__" cmake -B build-cosmo -G Ninja \
+    -DCMAKE_C_COMPILER=$COSMO/bin/cosmocc -DCMAKE_CXX_COMPILER=$COSMO/bin/cosmoc++ \
+    -DCMAKE_AR=$COSMO/bin/cosmoar -DCMAKE_RANLIB=$COSMO/bin/cosmoranlib \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-D__HAIKU__ -DCMAKE_CXX_FLAGS=-D__HAIKU__ \
+    -DC_FLAG_WA_NOEXECSTACK=OFF -DCAPSTONE_SH_SUPPORT=OFF -DBLOATY_ENABLE_BUILDID=OFF \
+    -DBLOATY_PREFER_SYSTEM_ABSL=NO -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO \
+    -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO -DBLOATY_PREFER_SYSTEM_RE2=NO \
+    -DBLOATY_PREFER_SYSTEM_ZLIB=NO -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+$ PATH="$COSMO/bin:$PATH" ninja -C build-cosmo bloaty
+```
+
+`build-cosmo/bloaty` is the APE. It passes the full bloaty test suite and its
+output is byte-identical to a native build. The flags are explained in
+[CLAUDE.md](CLAUDE.md); the
+[APE probe workflow](.github/workflows/ape-probe.yml) builds it in CI and
+verifies all-format ingestion with the same file on macOS arm64 and Windows
+runners (trigger it manually via workflow dispatch).
+
 ## Support
 
 GitHub issues and PRs welcome.  Please include tests when possible, see: 

@@ -91,6 +91,48 @@ unconditional under `__APPLE__`; unremovable without patching the abseil
 submodule). linux-clang stays a dynamic RelWithDebInfo sanity build with no
 artifact.
 
+## Cosmopolitan APE build (one file, every OS)
+
+`cosmocc` (GCC 14 + Cosmopolitan Libc, from https://cosmo.zip/pub/cosmocc/)
+builds bloaty as a single fat (x86_64+aarch64) Actually Portable Executable
+that runs natively on Linux, macOS incl. Apple Silicon, Windows, and BSDs
+with zero dylib/DLL dependencies. The exact configure line is in README.md
+("One-file build" section) and in `.github/workflows/ape-probe.yml`
+(manual-dispatch CI: ubuntu builds the APE, macOS-arm64 + Windows runners
+ingestion-test the same file).
+
+Why each knob (no submodule sources are patched — cache/flag level only):
+
+- `-D__HAIKU__` (in CMAKE_C(XX)_FLAGS **and** env `CXXFLAGS`, because the
+  top-level CMakeLists overwrites CMAKE_CXX_FLAGS after the third_party
+  subdirs are added and appends env CXXFLAGS after that): cosmocc defines no
+  OS macro abseil recognizes, so `ABSL_HAVE_MMAP` stays off and
+  low_level_alloc.cc/per_thread_sem.cc compile EMPTY while mutex.cc still
+  references them (undefined refs at link). `__HAIKU__`'s entire footprint in
+  the vendored trees is ABSL_HAVE_MMAP=1 + absl elf_mem_image off +
+  GTEST_OS_HAIKU. Do NOT use `__ros__` instead: it also flips
+  ABSL_HAVE_SEMAPHORE_H and cosmo's sem_t is 256 bytes, overflowing absl's
+  256-byte WaiterState (static assert).
+- `-DC_FLAG_WA_NOEXECSTACK=OFF`: pre-seeds a zstd cache check so zstd drops
+  `huf_decompress_amd64.S` (fat cosmocc refuses `.S` inputs entirely) and
+  defines ZSTD_DISABLE_ASM.
+- `-DCAPSTONE_SH_SUPPORT=OFF`: capstone's SH module declares
+  `enum direction {read, write}` which collides with cosmo's amalgamated
+  stdlib.h (declares POSIX read/write). Bloaty never maps to CS_ARCH_SH.
+- `-DBLOATY_ENABLE_BUILDID=OFF`: `-Wl,--build-id` inserts
+  .note.gnu.build-id ahead of cosmo's `.head` section and breaks the APE
+  image layout ("PT_LOAD segments must be ordered by p_vaddr").
+
+Gotchas: `chmod +x $COSMO/bin/cosmoranlib` after unzipping (ships 0644) and
+keep `$COSMO/bin` on PATH during builds (cosmoranlib execs its real binary
+via PATH). cosmoar rejects `@rsp` response files and paths with spaces.
+Cosmo cannot build shared libs, so zlib's `example`/`example64` ctest
+entries can't build (`-shared flag not supported`) — all 8 bloaty tests
+pass; vendored protoc links as an APE and runs fine on the Linux build host
+(no native protoc needed). ctest/bash can spawn APEs via the execvp ENOEXEC
+shell fallback; raw execve spawners (python subprocess) need binfmt_misc or
+an `assimilate`d copy.
+
 ## Layout
 
 ```
