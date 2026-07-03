@@ -1,0 +1,115 @@
+# TEMPORARY probe: can one Cosmopolitan APE binary run unmodified on the
+# Linux, macOS (arm64), and Windows runners? Manually dispatched only.
+# Delete this file once the cosmo-ape question is settled.
+name: APE probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cosmocc
+        run: |
+          curl -fSL https://cosmo.zip/pub/cosmocc/cosmocc.zip -o "$HOME/cosmocc.zip"
+          unzip -q "$HOME/cosmocc.zip" -d "$HOME/cosmocc"
+      - name: Write probe source
+        run: |
+          cat > hello.cc <<'EOF'
+          // Probe: iostream + std::thread + mmap under Cosmopolitan.
+          #include <cstdio>
+          #include <cstring>
+          #include <iostream>
+          #include <mutex>
+          #include <string>
+          #include <sys/mman.h>
+          #include <sys/utsname.h>
+          #include <thread>
+          #include <vector>
+
+          int main() {
+            struct utsname u;
+            if (uname(&u) == 0) {
+              std::cout << "uname: " << u.sysname << " " << u.machine << std::endl;
+            }
+            std::cout << "hello from APE, C++" << __cplusplus << std::endl;
+            std::mutex mu;
+            int sum = 0;
+            std::vector<std::thread> ts;
+            for (int i = 1; i <= 4; i++) {
+              ts.emplace_back([&mu, &sum, i] {
+                std::lock_guard<std::mutex> lk(mu);
+                sum += i;
+              });
+            }
+            for (auto& t : ts) t.join();
+            std::cout << "threads sum=" << sum << " (want 10)" << std::endl;
+            void* p = mmap(nullptr, 65536, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED) { perror("mmap"); return 1; }
+            memset(p, 0xAB, 65536);
+            unsigned char ok = static_cast<unsigned char*>(p)[65535];
+            munmap(p, 65536);
+            std::cout << "mmap ok, byte=0x" << std::hex << (int)ok << std::dec
+                      << std::endl;
+            return 0;
+          }
+          EOF
+      - name: Compile fat APE
+        run: |
+          "$HOME/cosmocc/bin/cosmoc++" -O2 -o hello.ape hello.cc
+          ls -la hello.ape
+      - name: Run on Linux build host
+        run: ./hello.ape
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-ape
+          path: hello.ape
+
+  macos-arm64:
+    needs: build-ape
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hello-ape
+      - name: Run APE on macOS
+        run: |
+          uname -m
+          sw_vers
+          chmod +x hello.ape
+          echo "=== attempt 1: direct ./hello.ape (cold; may compile ape loader) ==="
+          if time ./hello.ape; then
+            echo "DIRECT-EXEC-OK"
+          else
+            echo "DIRECT-EXEC-FAILED rc=$?"
+            echo "=== attempt 2: sh ./hello.ape ==="
+            time sh ./hello.ape && echo "SH-EXEC-OK"
+          fi
+          echo "=== warm second run ==="
+          time ./hello.ape
+          echo "=== ape loader artifacts ==="
+          ls -la "${TMPDIR:-/tmp}"/.ape* "$HOME"/.ape* 2>/dev/null || echo "no .ape loader file found"
+
+  windows:
+    needs: build-ape
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hello-ape
+      - name: Run APE on Windows (pwsh)
+        shell: pwsh
+        run: |
+          Copy-Item hello.ape hello.exe
+          Write-Host "=== run as hello.exe ==="
+          ./hello.exe
+          Write-Host "exe exit=$LASTEXITCODE"
+          Copy-Item hello.ape hello.com
+          Write-Host "=== run as hello.com ==="
+          ./hello.com
+          Write-Host "com exit=$LASTEXITCODE"
