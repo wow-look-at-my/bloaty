@@ -3,8 +3,13 @@
 # Delete this file once the cosmo-ape question is settled.
 name: APE probe
 
+# workflow_dispatch alone never registers on a non-default branch (the
+# dispatch API 404s), so also run on pushes that touch this file itself.
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/ape-probe.yml"
 
 permissions:
   contents: read
