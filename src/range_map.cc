@@ -99,7 +99,7 @@ bool RangeMap::TryGetLabel(uint64_t addr, std::string* label) const {
   if (iter == mappings_.end()) {
     return false;
   } else {
-    *label = iter->second.label;
+    *label = *iter->second.label;
     return true;
   }
 }
@@ -114,9 +114,11 @@ bool RangeMap::TryGetLabelForRange(uint64_t addr, uint64_t size,
   if (iter == mappings_.end()) {
     return false;
   } else {
-    *label = iter->second.label;
+    // Labels are interned per-map, so pointer equality <=> string equality.
+    const std::string* first_label = iter->second.label;
+    *label = *first_label;
     while (iter != mappings_.end() && iter->first + iter->second.size < end) {
-      if (iter->second.label != *label) {
+      if (iter->second.label != first_label) {
         return false;
       }
       ++iter;
@@ -143,12 +145,12 @@ std::string RangeMap::DebugString() const {
   return ret;
 }
 
-void RangeMap::AddRange(uint64_t addr, uint64_t size, const std::string& val) {
+void RangeMap::AddRange(uint64_t addr, uint64_t size, std::string_view val) {
   AddDualRange(addr, size, kNoTranslation, val);
 }
 
 template <class T>
-void RangeMap::MaybeSetLabel(T iter, const std::string& label, uint64_t addr,
+void RangeMap::MaybeSetLabel(T iter, std::string_view label, uint64_t addr,
                              uint64_t size) {
   assert(EntryContains(iter, addr));
   if (iter->second.size == kUnknownSize && size != kUnknownSize) {
@@ -179,15 +181,25 @@ void RangeMap::MaybeSetLabel(T iter, const std::string& label, uint64_t addr,
 }
 
 void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
-                            const std::string& label) {
+                            std::string_view label) {
   if (verbose_level > 2) {
-    printf("%p AddDualRange([%" PRIx64 ", %" PRIx64 "], %" PRIx64 ", %s)\n",
-           this, addr, size, otheraddr, label.c_str());
+    printf("%p AddDualRange([%" PRIx64 ", %" PRIx64 "], %" PRIx64 ", %.*s)\n",
+           this, addr, size, otheraddr, (int)label.size(), label.data());
   }
 
   if (size == 0) return;
 
   auto it = FindContainingOrAfter(addr);
+
+  // Intern the label lazily: only calls that actually insert an entry pay for
+  // the lookup, and repeated segments of one range intern just once.
+  const std::string* interned = nullptr;
+  auto intern = [&]() {
+    if (interned == nullptr) {
+      interned = InternLabel(label);
+    }
+    return interned;
+  };
 
   if (size == kUnknownSize) {
     assert(otheraddr == kNoTranslation);
@@ -195,7 +207,8 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
       MaybeSetLabel(it, label, addr, kUnknownSize);
     } else {
       auto iter = mappings_.emplace_hint(
-          it, std::make_pair(addr, Entry(label, kUnknownSize, kNoTranslation)));
+          it,
+          std::make_pair(addr, Entry(intern(), kUnknownSize, kNoTranslation)));
       if (verbose_level > 2) {
         printf("  added entry: %s\n", EntryDebugString(iter).c_str());
       }
@@ -233,11 +246,14 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
                                                    : addr - base + otheraddr;
     assert(this_end >= addr);
     auto iter = mappings_.emplace_hint(
-        it, std::make_pair(addr, Entry(label, this_end - addr, other)));
+        it, std::make_pair(addr, Entry(intern(), this_end - addr, other)));
     if (verbose_level > 2) {
       printf("  added entry: %s\n", EntryDebugString(iter).c_str());
     }
     CheckConsistency(iter);
+    // The btree insert invalidated |it|; re-derive it from the returned
+    // iterator (the new entry sits immediately before the old |it|).
+    it = std::next(iter);
     addr = this_end;
   }
 }
@@ -251,7 +267,7 @@ void RangeMap::AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
 // we could pass a parameter indicating whether such spanning is expected, and
 // warn if not.
 bool RangeMap::AddRangeWithTranslation(uint64_t addr, uint64_t size,
-                                       const std::string& val,
+                                       std::string_view val,
                                        const RangeMap& translator,
                                        bool verbose,
                                        RangeMap* other) {
@@ -292,11 +308,15 @@ void RangeMap::Compress() {
   auto prev = mappings_.begin();
   auto it = prev;
   while (it != mappings_.end()) {
+    // Labels are interned per-map, so pointer equality <=> string equality.
     if (prev->first + prev->second.size == it->first &&
         (prev->second.label == it->second.label ||
          (!prev->second.HasFallbackLabel() && it->second.IsShortFallback()))) {
       prev->second.size += it->second.size;
-      mappings_.erase(it++);
+      // The btree erase invalidates iterators; re-derive both from the
+      // returned successor (the merged-into entry directly precedes it).
+      it = mappings_.erase(it);
+      prev = std::prev(it);
     } else {
       prev = it;
       ++it;

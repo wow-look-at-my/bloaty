@@ -1,0 +1,122 @@
+# TEMPORARY probe: build the REAL bloaty as one Cosmopolitan APE on ubuntu,
+# then run format-ingestion checks with the SAME file on macOS (arm64) and
+# Windows. Manually dispatched (plus self-path pushes for registration).
+# Delete or promote once the cosmo-ape question is settled.
+name: APE probe
+
+# workflow_dispatch alone never registers on a non-default branch (the
+# dispatch API 404s), so also run on pushes that touch this file itself.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/ape-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-bloaty-ape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      - name: Cache cosmocc
+        id: cache-cosmocc
+        uses: actions/cache@v4
+        with:
+          path: ~/cosmocc
+          key: cosmocc-gcc14.1-2024-12
+      - name: Install cosmocc
+        if: steps.cache-cosmocc.outputs.cache-hit != 'true'
+        run: |
+          curl -fSL https://cosmo.zip/pub/cosmocc/cosmocc.zip -o "$HOME/cosmocc.zip"
+          unzip -q "$HOME/cosmocc.zip" -d "$HOME/cosmocc"
+          chmod +x "$HOME/cosmocc/bin/cosmoranlib"  # ships 0644 in the zip
+      - name: Configure (cosmocc, all deps vendored)
+        run: >
+          PATH="$HOME/cosmocc/bin:$PATH" CXXFLAGS="-D__HAIKU__"
+          cmake -B build-cosmo -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER="$HOME/cosmocc/bin/cosmocc"
+          -DCMAKE_CXX_COMPILER="$HOME/cosmocc/bin/cosmoc++"
+          -DCMAKE_AR="$HOME/cosmocc/bin/cosmoar"
+          -DCMAKE_RANLIB="$HOME/cosmocc/bin/cosmoranlib"
+          -DCMAKE_C_FLAGS="-D__HAIKU__"
+          -DCMAKE_CXX_FLAGS="-D__HAIKU__"
+          -DC_FLAG_WA_NOEXECSTACK=OFF
+          -DCAPSTONE_SH_SUPPORT=OFF
+          -DBLOATY_ENABLE_BUILDID=OFF
+          -DBLOATY_PREFER_SYSTEM_ABSL=NO
+          -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
+          -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
+          -DBLOATY_PREFER_SYSTEM_RE2=NO
+          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
+          -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+      - name: Build bloaty.ape
+        run: PATH="$HOME/cosmocc/bin:$PATH" ninja -C build-cosmo bloaty
+      - name: Sanity run on Linux (build host)
+        run: |
+          cp build-cosmo/bloaty bloaty.ape
+          ls -la bloaty.ape
+          ./bloaty.ape --version
+          ./bloaty.ape -d sections tests/testdata/linux-x86_64/05-binary.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-ape
+          path: bloaty.ape
+
+  macos-arm64:
+    needs: build-bloaty-ape
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bloaty-ape
+      - name: Ingest every format on macOS arm64
+        run: |
+          uname -m && sw_vers
+          chmod +x bloaty.ape
+          run_check() {  # run_check <expected-token> <bloaty args...>
+            want="$1"; shift
+            echo "=== bloaty.ape $* ==="
+            out=$(./bloaty.ape "$@")
+            echo "$out"
+            echo "$out" | grep -q "$want" || { echo "MISSING expected token: $want"; exit 1; }
+          }
+          run_check .symtab   -d sections tests/testdata/linux-x86_64/05-binary.bin
+          run_check __LINKEDIT -d segments,sections tests/testdata/ingestion/macho-thin-arm64.bin
+          run_check __LINKEDIT -d segments,sections tests/testdata/ingestion/macho-universal.bin
+          run_check .rdata    -d sections tests/testdata/PE/x64/msvc-15.0-foo-bar.dll
+          run_check Import    -d sections tests/testdata/ingestion/wasm-module.wasm
+          echo "ALL FORMATS OK ON MACOS ARM64"
+
+  windows:
+    needs: build-bloaty-ape
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bloaty-ape
+      - name: Ingest every format on Windows (pwsh)
+        shell: pwsh
+        run: |
+          Copy-Item bloaty.ape bloaty.exe
+          function Run-Check($want, $bloatyArgs) {
+            Write-Host "=== bloaty.exe $bloatyArgs ==="
+            $out = & ./bloaty.exe @bloatyArgs 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0) { throw "bloaty exited $LASTEXITCODE" }
+            if ($out -notmatch [regex]::Escape($want)) { throw "MISSING expected token: $want" }
+          }
+          Run-Check ".symtab"    @("-d","sections","tests/testdata/linux-x86_64/05-binary.bin")
+          Run-Check "__LINKEDIT" @("-d","segments,sections","tests/testdata/ingestion/macho-thin-arm64.bin")
+          Run-Check "__LINKEDIT" @("-d","segments,sections","tests/testdata/ingestion/macho-universal.bin")
+          Run-Check ".rdata"     @("-d","sections","tests/testdata/PE/x64/msvc-15.0-foo-bar.dll")
+          Run-Check "Import"     @("-d","sections","tests/testdata/ingestion/wasm-module.wasm")
+          Write-Host "ALL FORMATS OK ON WINDOWS"

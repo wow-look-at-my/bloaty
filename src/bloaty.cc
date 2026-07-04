@@ -237,6 +237,10 @@ void NameMunger::AddRegex(const std::string& regex,
 }
 
 std::string NameMunger::Munge(string_view name) const {
+  if (regexes_.empty()) {
+    return std::string(name);
+  }
+
   std::string name_str(name);
   std::string ret(name);
 
@@ -709,6 +713,12 @@ std::string PercentString(double percent, bool diff_mode) {
       return LeftPad(str, 6);
     }
   } else {
+    if (std::isnan(percent)) {
+      // Percent() returns NaN when both part and whole are zero, e.g. the VM
+      // percent of an input with no VM data at all (a WASM module, an object
+      // file).  Print a sane fixed-width value instead of "NAN%".
+      percent = 0;
+    }
     return DoubleStringPrintf("%5.1F%%", percent);
   }
 }
@@ -1207,7 +1217,14 @@ void RangeSink::AddFileRange(const char* analyzer, string_view name,
            name.data(), fileoff, filesize);
   }
   for (auto& pair : outputs_) {
-    const std::string label = pair.second->Munge(name);
+    // Fast path: with no regexes configured (the default), pass the name
+    // through without materializing a copy.
+    std::string munged;
+    string_view label = name;
+    if (!pair.second->IsEmpty()) {
+      munged = pair.second->Munge(name);
+      label = munged;
+    }
     if (translator_) {
       bool ok = pair.first->file_map.AddRangeWithTranslation(
           fileoff, filesize, label, translator_->file_map, verbose,
@@ -1317,7 +1334,12 @@ void RangeSink::AddVMRange(const char* analyzer, uint64_t vmaddr,
   }
   assert(translator_);
   for (auto& pair : outputs_) {
-    const std::string label = pair.second->Munge(name);
+    std::string munged;
+    string_view label = name;
+    if (!pair.second->IsEmpty()) {
+      munged = pair.second->Munge(name);
+      label = munged;
+    }
     bool ok = pair.first->vm_map.AddRangeWithTranslation(
         vmaddr, vmsize, label, translator_->vm_map, verbose,
         &pair.first->file_map);
@@ -1371,7 +1393,12 @@ void RangeSink::AddRange(const char* analyzer, string_view name,
   }
 
   for (auto& pair : outputs_) {
-    const std::string label = pair.second->Munge(name);
+    std::string munged;
+    string_view label = name;
+    if (!pair.second->IsEmpty()) {
+      munged = pair.second->Munge(name);
+      label = munged;
+    }
     uint64_t common = std::min(vmsize, filesize);
 
     pair.first->vm_map.AddDualRange(vmaddr, common, fileoff, label);

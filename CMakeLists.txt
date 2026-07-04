@@ -1,9 +1,14 @@
-cmake_minimum_required(VERSION 3.5)
-cmake_policy(SET CMP0048 NEW)
-if(POLICY CMP0091)
-  cmake_policy(SET CMP0091 NEW)
-endif()
+cmake_minimum_required(VERSION 3.16)
 project (Bloaty VERSION 1.1)
+
+# Some vendored third_party projects (zlib) still declare a
+# cmake_minimum_required older than 3.5, which CMake >= 4.0 refuses to
+# configure at all.  Raise the policy floor for those subprojects so that a
+# stock `cmake` invocation works without any extra flags.  Users can still
+# override this from the command line.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)  # Group projects in visual studio
@@ -14,6 +19,12 @@ option(BLOATY_ENABLE_UBSAN "Enable undefined behavior sanitizer." OFF)
 option(BLOATY_ENABLE_CMAKETARGETS "Enable installing cmake target files." ON)
 option(BLOATY_ENABLE_BUILDID "Enable build id." ON)
 option(BLOATY_ENABLE_RE2 "Enable the support for regular expression functions." ON)
+# Link the bloaty executable fully statically (-static). Linux/ELF only; use
+# with the BLOATY_PREFER_SYSTEM_* options off so every dependency has a static
+# archive available. Scoped to the bloaty target (not global linker flags)
+# because vendored subprojects (zlib's example/minigzip) link their own shared
+# libs and cannot build under a global -static.
+option(BLOATY_STATIC_BINARY "Link the bloaty executable fully statically." OFF)
 option(BLOATY_PREFER_SYSTEM_ABSL "Prefer to use the system absl if available" YES)
 option(BLOATY_PREFER_SYSTEM_CAPSTONE "Prefer to use the system capstone if available" YES)
 option(BLOATY_PREFER_SYSTEM_PROTOBUF "Prefer to use the system protobuf if available" YES)
@@ -86,11 +97,28 @@ endif()
 
 # Helper function for checking out Git submodules.
 function(init_submodule PATH)
+  file(GLOB SUBMODULE_CONTENTS "${CMAKE_CURRENT_SOURCE_DIR}/${PATH}/*")
+  if(SUBMODULE_CONTENTS)
+    # Already checked out (or vendored by hand); nothing to do.
+    return()
+  endif()
   message(STATUS "initializing submodule ${PATH}")
   execute_process(
     COMMAND git submodule update --init --recursive "${PATH}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE GIT_SUBMODULE_RESULT
   )
+  file(GLOB SUBMODULE_CONTENTS "${CMAKE_CURRENT_SOURCE_DIR}/${PATH}/*")
+  if(NOT GIT_SUBMODULE_RESULT EQUAL 0 OR NOT SUBMODULE_CONTENTS)
+    message(FATAL_ERROR
+      "Checking out submodule ${PATH} failed (git exited with "
+      "'${GIT_SUBMODULE_RESULT}').\n"
+      "Run:\n"
+      "  git submodule update --init --recursive\n"
+      "in ${CMAKE_CURRENT_SOURCE_DIR} and re-run cmake. If this source tree "
+      "was not cloned with git (e.g. a release tarball), download the "
+      "dependency into ${PATH} manually.")
+  endif()
 endfunction()
 
 # Add third_party libraries, disabling as much as we can of their builds.
@@ -480,6 +508,7 @@ if(UNIX OR MINGW)
   endif()
 endif()
 
+list(APPEND LIBBLOATY_DEPS absl::btree)
 list(APPEND LIBBLOATY_DEPS absl::strings)
 list(APPEND LIBBLOATY_DEPS absl::optional)
 list(APPEND LIBBLOATY_DEPS absl::demangle_internal)
@@ -496,6 +525,9 @@ if(DEFINED ENV{LIB_FUZZING_ENGINE})
 else()
   add_executable(bloaty src/main.cc)
   target_link_libraries(bloaty ${LIBBLOATY_LIBS})
+  if(BLOATY_STATIC_BINARY)
+    target_link_options(bloaty PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
 
   set_property(TARGET bloaty PROPERTY FOLDER "bloaty")
 
@@ -519,13 +551,26 @@ else()
     find_program(LIT_EXECUTABLE NAMES lit-script.py lit.py lit)
     find_program(FILECHECK_EXECUTABLE FileCheck)
     find_program(YAML2OBJ_EXECUTABLE yaml2obj)
-    if(Python_FOUND AND LIT_EXECUTABLE AND FILECHECK_EXECUTABLE AND YAML2OBJ_EXECUTABLE)
+    # A lit *.py source script (e.g. LLVM's utils/lit/lit.py, which apt's
+    # llvm-XX-tools ships) must be run through a Python interpreter. An
+    # installed `lit` entry point (pip/pipx/brew) must instead be exec'd
+    # directly: its shebang selects the interpreter it was installed for
+    # (possibly inside a venv), and forcing ${Python_EXECUTABLE} onto it
+    # bypasses that isolation and fails with "No module named 'lit'".
+    if(LIT_EXECUTABLE MATCHES "\\.py$")
+      set(LIT_COMMAND ${Python_EXECUTABLE} ${LIT_EXECUTABLE})
+      set(LIT_COMMAND_FOUND ${Python_FOUND})
+    else()
+      set(LIT_COMMAND ${LIT_EXECUTABLE})
+      set(LIT_COMMAND_FOUND ${LIT_EXECUTABLE})
+    endif()
+    if(LIT_COMMAND_FOUND AND FILECHECK_EXECUTABLE AND YAML2OBJ_EXECUTABLE)
       set(BLOATY_SRC_DIR ${PROJECT_SOURCE_DIR})
       set(BLOATY_OBJ_DIR ${PROJECT_BINARY_DIR})
       configure_file(tests/lit.site.cfg.in tests/lit.site.cfg @ONLY)
 
       add_custom_target(check-bloaty
-        COMMAND ${Python_EXECUTABLE} ${LIT_EXECUTABLE} -sv ${PROJECT_BINARY_DIR}/tests --param bloaty=$<TARGET_FILE:bloaty>
+        COMMAND ${LIT_COMMAND} -sv ${PROJECT_BINARY_DIR}/tests --param bloaty=$<TARGET_FILE:bloaty>
         DEPENDS
           bloaty
           ${CMAKE_CURRENT_SOURCE_DIR}/tests/lit.cfg
@@ -546,6 +591,7 @@ else()
           bloaty_test
           bloaty_test_pe
           bloaty_misc_test
+          bloaty_ingestion_test
           range_map_test
           )
 
@@ -571,6 +617,7 @@ else()
       add_test(NAME bloaty_test_pe_x64 COMMAND bloaty_test_pe WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/testdata/PE/x64)
       add_test(NAME bloaty_test_pe_x86 COMMAND bloaty_test_pe WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/testdata/PE/x86)
       add_test(NAME bloaty_misc_test COMMAND bloaty_misc_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/testdata/misc)
+      add_test(NAME bloaty_ingestion_test COMMAND bloaty_ingestion_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/testdata/ingestion)
       add_test(NAME fuzz_test COMMAND fuzz_test ${fuzz_corpus} WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests/testdata/fuzz_corpus)
     endif()
   endif()

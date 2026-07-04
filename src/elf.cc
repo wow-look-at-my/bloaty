@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/memory/memory.h"
 #include "absl/numeric/int128.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/substitute.h"
@@ -863,6 +864,15 @@ static void ReadELFSymbols(const InputFile& file, RangeSink* sink,
   DisassemblyInfo* infop = &info;
   bool capstone_available = ReadElfArchMode(file, &info.arch, &info.mode);
 
+  // Open one Capstone handle up front and reuse it for every function we
+  // disassemble; opening/closing one per function is expensive.
+  // DisassembleFindReferences() only handles x86 (it no-ops elsewhere).
+  std::unique_ptr<CapstoneHandle> capstone;
+  if (capstone_available && disassemble && info.arch == CS_ARCH_X86) {
+    capstone = absl::make_unique<CapstoneHandle>(info.arch, info.mode);
+  }
+  CapstoneHandle* capstonep = capstone.get();
+
   ForEachElf(
       file, sink,
       [=](const ElfFile& elf, string_view /*filename*/, uint64_t index_base) {
@@ -956,7 +966,9 @@ static void ReadELFSymbols(const InputFile& file, RangeSink* sink,
               }
               infop->text = sink->TranslateVMToFile(full_addr).substr(0, sym.st_size);
               infop->start_address = full_addr;
-              DisassembleFindReferences(*infop, sink);
+              if (capstonep) {
+                DisassembleFindReferences(*capstonep, *infop, sink);
+              }
             }
           }
         }

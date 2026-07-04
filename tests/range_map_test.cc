@@ -75,7 +75,7 @@ class RangeMapTest : public ::testing::Test {
       ASSERT_EQ(entry.addr, iter->first) << i;
       ASSERT_EQ(entry.end, map.RangeEnd(iter)) << i;
       ASSERT_EQ(entry.other_start, iter->second.other_start) << i;
-      ASSERT_EQ(entry.label, iter->second.label) << i;
+      ASSERT_EQ(entry.label, *iter->second.label) << i;
     }
     ASSERT_EQ(i, entries.size());
     ASSERT_EQ(iter, map.mappings_.end());

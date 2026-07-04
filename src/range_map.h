@@ -33,10 +33,13 @@
 #include <stdint.h>
 
 #include <exception>
-#include <map>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/strings/str_cat.h"
 
 namespace bloaty {
@@ -52,13 +55,13 @@ class RangeMap {
   RangeMap& operator=(RangeMap& other) = delete;
 
   // Adds a range to this map.
-  void AddRange(uint64_t addr, uint64_t size, const std::string& val);
+  void AddRange(uint64_t addr, uint64_t size, std::string_view val);
 
   // Adds a range to this map (in domain D1) that also corresponds to a
   // different range in a different map (in domain D2).  The correspondance will
   // be noted to allow us to translate into the other domain later.
   void AddDualRange(uint64_t addr, uint64_t size, uint64_t otheraddr,
-                    const std::string& val);
+                    std::string_view val);
 
   // Adds a range to this map (in domain D1), and also adds corresponding ranges
   // to |other| (in domain D2), using |translator| (in domain D1) to translate
@@ -71,7 +74,7 @@ class RangeMap {
   // contents of |this| and |other| are undefined (Bloaty will bail in this
   // case).
   bool AddRangeWithTranslation(uint64_t addr, uint64_t size,
-                               const std::string& val,
+                               std::string_view val,
                                const RangeMap& translator, bool verbose,
                                RangeMap* other);
 
@@ -109,7 +112,7 @@ class RangeMap {
 
   static std::string EntryDebugString(uint64_t addr, uint64_t size,
                                       uint64_t other_start,
-                                      const std::string& label) {
+                                      std::string_view label) {
     std::string end =
         size == kUnknownSize ? "?" : absl::StrCat(absl::Hex(addr + size));
     std::string ret = absl::StrCat("[", absl::Hex(addr), ", ", end,
@@ -126,7 +129,7 @@ class RangeMap {
       return "[end]";
     } else {
       return EntryDebugString(it->first, it->second.size,
-                              it->second.other_start, it->second.label);
+                              it->second.other_start, *it->second.label);
     }
   }
 
@@ -144,7 +147,7 @@ class RangeMap {
   template <class Func>
   void ForEachRangeWithStart(uint64_t start, Func func) const {
     for (auto iter = FindContaining(start); iter != mappings_.end(); ++iter) {
-      if (!func(iter->second.label, iter->first,
+      if (!func(*iter->second.label, iter->first,
                 RangeEnd(iter) - iter->first)) {
         return;
       }
@@ -158,14 +161,19 @@ class RangeMap {
   static const uint64_t kNoTranslation = UINT64_MAX;
 
   struct Entry {
-    Entry(const std::string& label_, uint64_t size_, uint64_t other_)
+    Entry(const std::string* label_, uint64_t size_, uint64_t other_)
         : label(label_), size(size_), other_start(other_) {}
-    std::string label;
+    // Interned: points into labels_, which deduplicates the (often highly
+    // repetitive) label strings instead of storing a copy per entry.  Within
+    // one RangeMap, labels are equal iff their pointers are equal.
+    const std::string* label;
     uint64_t size;
     uint64_t other_start;  // kNoTranslation if there is no mapping.
 
     bool HasTranslation() const { return other_start != kNoTranslation; }
-    bool HasFallbackLabel() const { return !label.empty() && label[0] == '['; }
+    bool HasFallbackLabel() const {
+      return !label->empty() && (*label)[0] == '[';
+    }
 
     // We assume that short regions that were unattributed (have fallback
     // labels) are actually padding. We could probably make this heuristic
@@ -173,8 +181,42 @@ class RangeMap {
     bool IsShortFallback() const { return size <= 16 && HasFallbackLabel(); }
   };
 
-  typedef std::map<uint64_t, Entry> Map;
+  // A btree instead of std::map: multi-entry nodes need ~4x fewer cache-line
+  // touches per descent and no per-entry allocation.  Unlike std::map,
+  // insert/erase invalidate iterators, so mutation sites must refresh any
+  // iterator they keep using (AddDualRange, Compress).
+  typedef absl::btree_map<uint64_t, Entry> Map;
   Map mappings_;
+
+  // Transparent hash/equality so labels_ can be probed with a string_view
+  // without materializing a std::string.
+  struct LabelHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const {
+      return std::hash<std::string_view>()(s);
+    }
+  };
+  struct LabelEq {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const {
+      return a == b;
+    }
+  };
+
+  // Owns one copy of each distinct label used by entries of this map.
+  // Element addresses are stable across insertion and container moves, so
+  // Entry::label pointers stay valid for the lifetime of the RangeMap.
+  std::unordered_set<std::string, LabelHash, LabelEq> labels_;
+
+  // Returns the address of the interned copy of |label| (inserting it if
+  // needed).
+  const std::string* InternLabel(std::string_view label) {
+    auto it = labels_.find(label);
+    if (it == labels_.end()) {
+      it = labels_.emplace(label).first;
+    }
+    return &*it;
+  }
 
   template <class T>
   void CheckConsistency(T iter) const {
@@ -200,7 +242,7 @@ class RangeMap {
   }
 
   template <class T>
-  void MaybeSetLabel(T iter, const std::string& label, uint64_t addr,
+  void MaybeSetLabel(T iter, std::string_view label, uint64_t addr,
                      uint64_t end);
 
   // When the size is unknown return |unknown| for the end.
@@ -335,7 +377,7 @@ void RangeMap::ComputeRollup(const std::vector<const RangeMap*>& range_maps,
           assert(false);
           throw std::runtime_error("No more ranges.");
         }
-        keys.push_back(iters[i]->second.label);
+        keys.push_back(*iters[i]->second.label);
       }
     }
 
@@ -379,7 +421,7 @@ void RangeMap::ComputeRollup(const std::vector<const RangeMap*>& range_maps,
           continuous = false;
         } else {
           assert(continuous);
-          keys[i] = iter->second.label;
+          keys[i] = *iter->second.label;
         }
       }
       current = next_break;

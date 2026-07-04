@@ -1,0 +1,6 @@
+# Fixture binaries must never be CRLF-converted (Windows runners set
+# core.autocrlf=true in the image gitconfig).
+* -text
+*.yaml text
+*.md text
+.gitattributes text

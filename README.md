@@ -1,7 +1,7 @@
 
 # Bloaty: a size profiler for binaries
 
-[![build](https://github.com/google/bloaty/actions/workflows/build.yml/badge.svg)](https://github.com/google/bloaty/actions/workflows/build.yml)
+[![CI](https://github.com/wow-look-at-my/bloaty/actions/workflows/ci.yml/badge.svg)](https://github.com/wow-look-at-my/bloaty/actions/workflows/ci.yml)
 
 Ever wondered what's making your binary big?  Bloaty will
 show you a size profile of the binary so you can understand
@@ -62,13 +62,21 @@ please see [How Bloaty Works](doc/how-bloaty-works.md).
 
 ## Install
 
-To build, use `cmake`. For example:
+To build, use `cmake` (3.16 or newer, including CMake 4.x) and a C++20
+compiler. For example:
 
 ```
 $ cmake -B build -G Ninja -S .
 $ cmake --build build
 $ cmake --build build --target install
 ```
+
+Bloaty builds and passes its full test suite on Linux (gcc and clang), macOS
+(AppleClang), and Windows (MSVC) — see
+[.github/workflows/ci.yml](.github/workflows/ci.yml). File-format support is
+host-independent: every platform can analyze every supported format (an ELF
+host can profile a Mach-O or PE binary and vice versa), and CI verifies this
+on every push.
 
 Bloaty bundles ``libprotobuf``, ``re2``, ``capstone``, and
 ``pkg-config`` as Git submodules, and uses ``protoc`` build
@@ -85,6 +93,37 @@ $ git submodule update --init --recursive
 
 To run the tests, see the info in
 [tests/README.md](tests/README.md).
+
+### One-file build for every OS (Actually Portable Executable)
+
+Bloaty also builds as a single [Cosmopolitan](https://github.com/jart/cosmopolitan)
+APE binary: one ~27MB file containing both x86_64 and aarch64 code that runs
+natively on Linux, macOS (including Apple Silicon), Windows (rename to
+`bloaty.exe`), and the BSDs, with zero dynamic library dependencies — on macOS
+it does not even link libSystem (a tiny loader is self-extracted and compiled
+once on first run).
+
+Download [cosmocc](https://cosmo.zip/pub/cosmocc/cosmocc.zip), unzip it to
+`$COSMO`, `chmod +x $COSMO/bin/cosmoranlib` (the zip drops the bit), then:
+
+```
+$ PATH="$COSMO/bin:$PATH" CXXFLAGS="-D__HAIKU__" cmake -B build-cosmo -G Ninja \
+    -DCMAKE_C_COMPILER=$COSMO/bin/cosmocc -DCMAKE_CXX_COMPILER=$COSMO/bin/cosmoc++ \
+    -DCMAKE_AR=$COSMO/bin/cosmoar -DCMAKE_RANLIB=$COSMO/bin/cosmoranlib \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-D__HAIKU__ -DCMAKE_CXX_FLAGS=-D__HAIKU__ \
+    -DC_FLAG_WA_NOEXECSTACK=OFF -DCAPSTONE_SH_SUPPORT=OFF -DBLOATY_ENABLE_BUILDID=OFF \
+    -DBLOATY_PREFER_SYSTEM_ABSL=NO -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO \
+    -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO -DBLOATY_PREFER_SYSTEM_RE2=NO \
+    -DBLOATY_PREFER_SYSTEM_ZLIB=NO -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+$ PATH="$COSMO/bin:$PATH" ninja -C build-cosmo bloaty
+```
+
+`build-cosmo/bloaty` is the APE. It passes the full bloaty test suite and its
+output is byte-identical to a native build. The flags are explained in
+[CLAUDE.md](CLAUDE.md); the
+[APE probe workflow](.github/workflows/ape-probe.yml) builds it in CI and
+verifies all-format ingestion with the same file on macOS arm64 and Windows
+runners (trigger it manually via workflow dispatch).
 
 ## Support
 

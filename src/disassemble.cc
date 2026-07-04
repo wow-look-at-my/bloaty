@@ -40,24 +40,36 @@ static std::string RightPad(const std::string& input, size_t size) {
 
 }  // anonymous namespace
 
-void DisassembleFindReferences(const DisassemblyInfo& info, RangeSink* sink) {
+CapstoneHandle::CapstoneHandle(cs_arch arch, cs_mode mode) {
+  if (cs_open(arch, mode, &handle_) != CS_ERR_OK ||
+      cs_option(handle_, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
+    THROW("Couldn't initialize Capstone");
+  }
+  insn_ = cs_malloc(handle_);
+}
+
+CapstoneHandle::~CapstoneHandle() {
+  if (insn_) {
+    cs_free(insn_, 1);
+  }
+  if (handle_) {
+    cs_close(&handle_);
+  }
+}
+
+void DisassembleFindReferences(const CapstoneHandle& capstone,
+                               const DisassemblyInfo& info, RangeSink* sink) {
   if (info.arch != CS_ARCH_X86) {
     // x86 only for now.
     return;
   }
 
-  csh handle;
-  if (cs_open(info.arch, info.mode, &handle) != CS_ERR_OK ||
-      cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
-    THROW("Couldn't initialize Capstone");
-  }
-
   if (info.text.size() == 0) {
-    cs_close(&handle);
     THROW("Tried to disassemble empty function.");
   }
 
-  cs_insn *in = cs_malloc(handle);
+  csh handle = capstone.handle();
+  cs_insn *in = capstone.insn();
   uint64_t address = info.start_address;
   const uint8_t* ptr = reinterpret_cast<const uint8_t*>(info.text.data());
   size_t size = info.text.size();
@@ -70,7 +82,7 @@ void DisassembleFindReferences(const DisassemblyInfo& info, RangeSink* sink) {
         printf("Error disassembling function at address: %" PRIx64 "\n",
                address);
       }
-      goto cleanup;
+      return;
     }
 
     size_t count = in->detail->x86.op_count;
@@ -87,10 +99,6 @@ void DisassembleFindReferences(const DisassemblyInfo& info, RangeSink* sink) {
       }
     }
   }
-
-cleanup:
-  cs_free(in, 1);
-  cs_close(&handle);
 }
 
 bool TryGetJumpTarget(cs_arch arch, cs_insn *in, uint64_t* target) {

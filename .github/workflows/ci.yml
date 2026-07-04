@@ -1,0 +1,365 @@
+name: CI
+
+on:
+  push:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job builds bloaty and runs the full ctest suite, which includes
+# bloaty_ingestion_test: every OS parses fixtures of every supported format
+# (ELF, PE, Mach-O thin + universal, WASM, DWARF5) with no external tools.
+# The lit suite (deeper per-format coverage; needs FileCheck + yaml2obj at
+# test time) runs where those tools are cheap to install: apt on Linux, brew
+# on macOS. On Windows there is no cheap prebuilt FileCheck/yaml2obj (the
+# official LLVM release tarballs are not verified to ship them, and building
+# LLVM from source takes hours), so the Windows job is ctest-only; the
+# ingestion test still proves all-format parsing there.
+#
+# Artifact binaries are as static as each platform allows, so they run on any
+# machine of that OS/arch, and each artifact job *enforces* that:
+#   linux-gcc: fully static ELF (-static; all deps vendored) - no interpreter,
+#              no NEEDED entries. linux-clang stays dynamic as a sanity build.
+#   windows:   static CRT (/MT via CMAKE_MSVC_RUNTIME_LIBRARY) - only OS DLLs
+#              like KERNEL32 allowed; no vcruntime/msvcp/api-ms-win-crt-*.
+#   macos:     universal (arm64 + x86_64), deployment target 11.0, all deps
+#              vendored static INCLUDING the C++ runtime (a source-built
+#              universal libc++.a/libc++abi.a replaces libc++.1.dylib). The
+#              only dylibs are /usr/lib/libSystem.B.dylib and CoreFoundation:
+#              libSystem is XNU's sole stable syscall ABI (Apple ships no
+#              static libSystem; raw-syscall binaries break across macOS
+#              updates - see Go pre-1.11), and CoreFoundation is pulled in by
+#              abseil cctz's local_time_zone() (unconditional on __APPLE__;
+#              unremovable without patching the abseil submodule). Both ship
+#              with every macOS install, so this is "as static as macOS
+#              allows" - enforced to exactly those two, per arch.
+
+jobs:
+  linux-gcc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache llvm-18 llvm-18-tools
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-linux-gcc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-linux-gcc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-linux-gcc-
+      - name: Configure
+        # Release + fully static bloaty (glibc >= 2.34 on ubuntu-24.04 makes
+        # -static safe: libpthread is merged into libc, and bloaty uses no
+        # dlopen/NSS). All deps vendored so nothing links runner-provided
+        # libs; protobuf_WITH_ZLIB=OFF stops protobuf pulling in the system
+        # libz.so (bloaty never uses protobuf's gzip streams). The lit suite
+        # below runs against the static binary itself.
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DBLOATY_STATIC_BINARY=ON
+          -DBLOATY_PREFER_SYSTEM_ABSL=NO
+          -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
+          -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
+          -DBLOATY_PREFER_SYSTEM_RE2=NO
+          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
+          -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+          -Dprotobuf_WITH_ZLIB=OFF
+          -DFILECHECK_EXECUTABLE=/usr/lib/llvm-18/bin/FileCheck
+          -DYAML2OBJ_EXECUTABLE=/usr/lib/llvm-18/bin/yaml2obj
+          -DLIT_EXECUTABLE=/usr/lib/llvm-18/build/utils/lit/lit.py
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Verify fully static binary
+        run: |
+          file build/bloaty
+          (ldd build/bloaty 2>&1 || true) | grep 'not a dynamic executable'
+          ! (readelf -d build/bloaty | grep NEEDED)
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Test (lit)
+        run: cmake --build build --target check-bloaty
+      - name: ccache stats
+        run: ccache -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-linux-x64
+          path: build/bloaty
+
+  linux-clang:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache llvm-18 llvm-18-tools
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-linux-clang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-linux-clang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-linux-clang-
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFILECHECK_EXECUTABLE=/usr/lib/llvm-18/bin/FileCheck
+          -DYAML2OBJ_EXECUTABLE=/usr/lib/llvm-18/bin/yaml2obj
+          -DLIT_EXECUTABLE=/usr/lib/llvm-18/build/utils/lit/lit.py
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Test (lit)
+        run: cmake --build build --target check-bloaty
+      - name: ccache stats
+        run: ccache -s
+
+  macos:
+    runs-on: macos-latest  # arm64 (Apple Silicon), AppleClang
+    timeout-minutes: 90
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+      # Pinned LLVM release used to source-build the static universal libc++
+      # that replaces /usr/lib/libc++.1.dylib in the shipped binary.
+      LIBCXX_LLVM_TAG: llvmorg-20.1.8
+      LIBCXX_STATIC_PREFIX: ${{ github.workspace }}/.libcxx-static
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: |
+          brew install ccache ninja llvm
+          pipx install lit
+      - name: Check test tools
+        # The lit suite needs FileCheck and yaml2obj; Homebrew's llvm formula
+        # builds with -DLLVM_INSTALL_UTILS=ON, which ships both. Fail loudly
+        # here (not deep in the test step) if that ever changes.
+        run: |
+          ls -l "$(brew --prefix llvm)/bin/FileCheck" "$(brew --prefix llvm)/bin/yaml2obj"
+          command -v lit
+      - name: Restore static libc++ cache
+        id: libcxx-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.libcxx-static
+          key: libcxx-static-1-${{ env.LIBCXX_LLVM_TAG }}-macos11.0
+      - name: Build static universal libc++ / libc++abi
+        # Apple ships no static C++ runtime (only libc++.1.dylib), and brew
+        # llvm's libc++.a is a single-arch bottle, so a universal static
+        # libc++ must be source-built: same deployment target and arch set
+        # as bloaty, shared libs off. The install tree (headers + libc++.a +
+        # libc++abi.a) is cached; warm runs skip this step entirely.
+        # _Unwind_* stays dynamic from libSystem (which reexports the OS
+        # unwinder) - that is below the C++ runtime and part of the OS ABI.
+        if: steps.libcxx-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          VER="${LIBCXX_LLVM_TAG#llvmorg-}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/llvm-project.tar.xz" \
+            "https://github.com/llvm/llvm-project/releases/download/${LIBCXX_LLVM_TAG}/llvm-project-${VER}.src.tar.xz"
+          tar -xf "$RUNNER_TEMP/llvm-project.tar.xz" -C "$RUNNER_TEMP"
+          cmake -S "$RUNNER_TEMP/llvm-project-${VER}.src/runtimes" \
+            -B "$RUNNER_TEMP/libcxx-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$LIBCXX_STATIC_PREFIX" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXX_ENABLE_STATIC=ON \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_STATIC=ON \
+            -DLIBCXXABI_USE_LLVM_UNWINDER=OFF \
+            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            -DLIBCXX_INCLUDE_TESTS=OFF \
+            -DLIBCXXABI_INCLUDE_TESTS=OFF
+          cmake --build "$RUNNER_TEMP/libcxx-build" --parallel
+          cmake --install "$RUNNER_TEMP/libcxx-build"
+          lipo -info "$LIBCXX_STATIC_PREFIX/lib/libc++.a" "$LIBCXX_STATIC_PREFIX/lib/libc++abi.a"
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-macos-appleclang-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-macos-appleclang-
+      - name: Configure
+        # Universal binary (arm64 + x86_64), min macOS 11.0, all deps vendored
+        # static: runs on any Mac >= 11. (Vendored zlib requires >= 1.3.x
+        # here: 1.2.11's classic-MacOS 'fdopen' macro hack in zutil.h broke
+        # compilation under modern SDKs.) Tests below exercise the arm64
+        # slice natively on this runner.
+        #
+        # The C++ runtime is linked statically from the source-built libc++:
+        #   - CXXFLAGS (appended to CMAKE_CXX_FLAGS by the top-level
+        #     CMakeLists, which otherwise overwrites that variable) swaps the
+        #     SDK's libc++ headers for the matching static-libc++ headers;
+        #   - -fno-typed-cxx-new-delete: AppleClang 21 emits typed operator
+        #     new by default, which aborts at startup when libc++abi is
+        #     linked statically ("typed operator new being invoked before
+        #     its static initializer in libcxx has been executed" - probed
+        #     on this exact runner image); the abort message prescribes
+        #     this flag;
+        #   - -nostdlib++ drops the driver's implicit -lc++;
+        #   - CMAKE_CXX_STANDARD_LIBRARIES appends libc++.a/libc++abi.a at
+        #     the end of every executable's link line (correct archive order).
+        env:
+          CXXFLAGS: -nostdinc++ -isystem ${{ env.LIBCXX_STATIC_PREFIX }}/include/c++/v1 -fno-typed-cxx-new-delete
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_EXE_LINKER_FLAGS=-nostdlib++
+          -DCMAKE_CXX_STANDARD_LIBRARIES="$LIBCXX_STATIC_PREFIX/lib/libc++.a $LIBCXX_STATIC_PREFIX/lib/libc++abi.a"
+          -DBLOATY_PREFER_SYSTEM_ABSL=NO
+          -DBLOATY_PREFER_SYSTEM_CAPSTONE=NO
+          -DBLOATY_PREFER_SYSTEM_PROTOBUF=NO
+          -DBLOATY_PREFER_SYSTEM_RE2=NO
+          -DBLOATY_PREFER_SYSTEM_ZLIB=NO
+          -DBLOATY_PREFER_SYSTEM_ZSTD=NO
+          -Dprotobuf_WITH_ZLIB=OFF
+          -DFILECHECK_EXECUTABLE="$(brew --prefix llvm)/bin/FileCheck"
+          -DYAML2OBJ_EXECUTABLE="$(brew --prefix llvm)/bin/yaml2obj"
+          -DLIT_EXECUTABLE="$(command -v lit)"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Verify universal binary, libSystem + CoreFoundation only
+        # "As static as macOS allows", enforced per arch:
+        #   /usr/lib/libSystem.B.dylib - XNU's only stable syscall ABI; Apple
+        #     ships no static libSystem, and raw-syscall binaries break
+        #     across macOS updates (Go pre-1.11), so this is the floor.
+        #   CoreFoundation - required by abseil cctz local_time_zone()
+        #     (absl/time/internal/cctz/src/time_zone_lookup.cc, unconditional
+        #     #if defined(__APPLE__), reached via protobuf -> absl::log ->
+        #     absl::LocalTimeZone); unremovable without patching the abseil
+        #     submodule. An OS framework on every macOS install, same class
+        #     as libSystem.
+        # Everything else - including the C++ runtime - must be static:
+        # libc++.1.dylib in particular must NOT appear. Also enforce both
+        # arches and the 11.0 deployment target (LC_BUILD_VERSION minos).
+        run: |
+          lipo -info build/bloaty
+          lipo -info build/bloaty | grep arm64
+          lipo -info build/bloaty | grep x86_64
+          expected="$(printf '%s\n%s' \
+            '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation' \
+            '/usr/lib/libSystem.B.dylib')"
+          for arch in arm64 x86_64; do
+            echo "=== $arch ==="
+            otool -arch "$arch" -L build/bloaty
+            got="$(otool -arch "$arch" -L build/bloaty | tail -n +2 | awk '{print $1}' | sort)"
+            if [ "$got" != "$expected" ]; then
+              echo "FAIL: $arch dylib set is not exactly libSystem.B + CoreFoundation"
+              exit 1
+            fi
+            otool -arch "$arch" -l build/bloaty | grep -A4 LC_BUILD_VERSION | head -6
+            otool -arch "$arch" -l build/bloaty | grep -A4 LC_BUILD_VERSION | grep -q 'minos 11.0' || {
+              echo "FAIL: $arch minos is not 11.0"; exit 1;
+            }
+          done
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Test (lit)
+        run: cmake --build build --target check-bloaty
+      - name: ccache stats
+        run: ccache -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-macos-universal
+          path: build/bloaty
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 500M
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install dependencies
+        run: choco install -y --no-progress ccache ninja
+      - name: Locate Visual Studio
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "No Visual Studio installation with C++ tools found" }
+          "BLOATY_VS_PATH=$vs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Import MSVC x64 environment
+        # Hand-rolled vcvars (third-party setup actions are not allowed):
+        # run vcvars64.bat, then export the resulting environment (PATH,
+        # INCLUDE, LIB, ...) to all following steps.
+        shell: cmd
+        run: call "%BLOATY_VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" && set >> "%GITHUB_ENV%"
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-1-windows-msvc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-1-windows-msvc-${{ hashFiles('.gitmodules', 'CMakeLists.txt') }}-
+            ccache-1-windows-msvc-
+      - name: Configure
+        # Release (not Debug/RelWithDebInfo): ccache cannot cache /Zi debug
+        # info, and MSVC Debug is by far the slowest configuration.
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Verify static CRT (OS DLLs only)
+        # CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded (/MT) statically links the
+        # CRT; the exe must not depend on vcruntime*/msvcp*/api-ms-win-crt-*
+        # redistributable DLLs. OS DLLs (KERNEL32 etc.) are unavoidable -
+        # that is as static as Windows allows.
+        shell: pwsh
+        run: |
+          $deps = (& dumpbin /dependents build\bloaty.exe) -join "`n"
+          Write-Host $deps
+          if ($deps -match '(?i)vcruntime|msvcp|api-ms-win-crt') {
+            throw "bloaty.exe depends on CRT redistributable DLLs (not statically linked)"
+          }
+      - name: Test (ctest)
+        # No lit here: FileCheck/yaml2obj have no cheap prebuilt source on
+        # Windows. ctest includes bloaty_ingestion_test, which still proves
+        # that Windows ingests every format (ELF, PE, Mach-O, WASM, DWARF5).
+        run: ctest --test-dir build --output-on-failure
+      - name: ccache stats
+        run: ccache -s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bloaty-windows-x64
+          path: build/bloaty.exe
